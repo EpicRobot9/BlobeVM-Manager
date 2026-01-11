@@ -399,9 +399,9 @@ run_container() {
   _meta_title="$(get_meta "$name" title || true)"
   local TITLE_ENV
   if [[ -n "$_meta_title" ]]; then
-    TITLE_ENV="$_meta_title"
+    TITLE_ENV="EpicVM - $_meta_title"
   else
-    TITLE_ENV="${name}"
+    TITLE_ENV="EpicVM - ${name}"
   fi
 
   docker run -d \
