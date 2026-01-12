@@ -418,7 +418,7 @@ run_container() {
     ${net_args[@]:-} \
     ${kvm_args[@]} \
     $(common_labels "$name") \
-    "${BLOBEVM_IMAGE:-blobevm:latest}" \
+    "${BLOBEVM_IMAGE:-kasmweb/chrome:latest}" \
     >/dev/null
 }
 
@@ -654,7 +654,7 @@ cmd_delete_all_instances() {
 
 cmd_rebuild_image() {
   local ctx="${REPO_DIR:-/opt/blobe-vm}"
-  local image="${BLOBEVM_IMAGE:-blobevm:latest}"
+  local image="${BLOBEVM_IMAGE:-kasmweb/chrome:latest}"
   [[ -d "$ctx" ]] || { echo "REPO_DIR not found: $ctx" >&2; exit 1; }
   echo "Building image '$image' from $ctx ..."
   docker build -t "$image" "$ctx"
