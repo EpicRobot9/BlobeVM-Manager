@@ -986,7 +986,7 @@ def _request_host():
 
 def _vm_host_port(cname: str) -> str:
     try:
-        r = _docker('port', cname, '3000/tcp')
+        r = _docker('port', cname, '4901/tcp')
         if r.returncode == 0 and r.stdout:
             line = r.stdout.strip().splitlines()[0]
             parts = line.rsplit(':', 1)
