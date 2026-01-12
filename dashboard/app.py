@@ -13,6 +13,13 @@ except Exception:
     psutil = None
 
 app = Flask(__name__)
+@app.before_request
+def _block_v2_routes():
+    # Disable Dashboard v2 server build/start/auth routes and any requests
+    # targeting the `/Dashboard` path or the `/dashboard/api/v2` namespace.
+    p = request.path or ''
+    if p.startswith('/Dashboard') or p.startswith('/dashboard/api/v2') or p == '/dashboard/api/v2status' or p.startswith('/Dashboard/api'):
+        return ('Not Found', 404)
  
 # --- Auth helpers (must be defined before route decorators) ---
 BUSER = os.environ.get('BLOBEDASH_USER')
@@ -113,11 +120,7 @@ TEMPLATE = r"""
 </head><body>
 <h1 id="dash-title">{{ title }}</h1>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
-<div id=v2status style="margin:.5rem 0;padding:.5rem;border:1px dashed #233;background:#071229;border-radius:6px;color:#cfe8ff">
-New dashboard status: <span id="v2state">Checking…</span>
-<span id="v2link"></span>
-</div>
-<!-- v2 dashboard status script moved to end of body -->
+    
 </body>
 <script>
 async function pollV2Status() {
@@ -178,7 +181,7 @@ window.addEventListener('DOMContentLoaded', pollV2Status);
     <strong style="display:block;margin-bottom:.25rem">Dashboard Settings</strong>
     <input id="setting-title" placeholder="Dashboard title" style="width:320px" />
     <input id="setting-favicon" placeholder="Favicon URL (http/https)" style="width:320px;margin-left:.5rem" />
-    <input id="setting-v2pw" placeholder="New Dashboard v2 admin password (leave blank to keep)" style="width:420px;display:block;margin-top:.5rem" />
+    
     <!-- Removed favicon upload -->
     <button onclick="saveSettings()" style="margin-left:.5rem">Save</button>
     <button onclick="clearFavicon()" class="btn-gray" style="margin-left:.25rem">Clear Favicon</button>
@@ -308,62 +311,7 @@ async function load(){
         console.error('[BLOBEDASH] load() error', err);
     }
 }
-// Check new dashboard availability and API presence
-async function checkV2(){
-    const el = document.getElementById('v2state');
-    if(!el) return;
-    el.textContent = 'Checking…';
-    try{
-        const r = await fetch('/Dashboard/', {cache:'no-store'});
-        if(r.ok){
-            el.innerHTML = 'Available — <a href="/Dashboard/" target="_blank">Open</a>';
-        }else if(r.status === 404){
-            el.textContent = 'Not built (no files)';
-        }else{
-            const txt = await r.text().catch(()=>r.statusText||'error')
-            el.textContent = `HTTP ${r.status}: ${txt.slice(0,120)}`
-        }
-    }catch(e){
-        el.textContent = 'Error contacting /Dashboard: ' + (e && e.message ? e.message : String(e))
-    }
-    // Check whether v2 API endpoints exist (unauthenticated probe)
-    try{
-        const r2 = await fetch('/dashboard/api/vm/stats', {method:'GET', cache:'no-store'});
-        if(r2.status === 401){
-            el.innerHTML += ' · API: present (auth required)'
-        }else if(r2.ok){
-            el.innerHTML += ' · API: present'
-        }else if(r2.status === 404){
-            el.innerHTML += ' · API: missing (404)'
-        }else{
-            el.innerHTML += ' · API status: ' + r2.status
-        }
-    }catch(e){
-        el.innerHTML += ' · API probe error: ' + (e && e.message ? e.message : String(e))
-    }
-    // fetch server-side info for more details (requires auth)
-    try{
-        const r3 = await fetch('/dashboard/api/v2/info')
-        if(r3.ok){
-            const j = await r3.json().catch(()=>null)
-            if(j && j.info){
-                const info = j.info
-                if(info.last_error){
-                    el.innerHTML += '<div style="margin-top:6px;color:#fbb">Build error: '+(info.last_error.length>300?info.last_error.slice(0,300)+'…':info.last_error)+'</div>'
-                }else if(!info.dist_exists){
-                    el.innerHTML += ' · No build artifacts found'
-                }else{
-                    const m = info.index_mtime ? new Date(info.index_mtime*1000).toLocaleString() : ''
-                    el.innerHTML += ` · Built: ${m} · files: ${info.files_count}`
-                }
-            }
-        }
-    }catch(e){ /* ignore */ }
-}
-
-// run the v2 probe at start and periodically
-setTimeout(checkV2, 500);
-setInterval(checkV2, 30*1000);
+// Dashboard v2 removed: probe/availability checks disabled.
 function recreateVM(name){
     if(!confirm('Recreate VM '+name+'?'))return;
     fetch('/dashboard/api/recreate',{
@@ -699,9 +647,7 @@ async function checkVM(ev,name){
             const j = await r.json().catch(()=>({}));
             document.getElementById('setting-title').value = j.title || '';
             document.getElementById('setting-favicon').value = j.favicon_url || j.favicon || '';
-            // Do not populate the v2 admin password for security; leave blank.
-            const v2pwEl = document.getElementById('setting-v2pw');
-            if(v2pwEl) v2pwEl.value = '';
+            // Dashboard v2 has been removed; no v2 admin password field to populate.
         }catch(e){ console.error('loadSettings', e); }
     }
 
@@ -709,7 +655,7 @@ async function checkVM(ev,name){
         try{
             const title = document.getElementById('setting-title').value || '';
             const fav = document.getElementById('setting-favicon').value || '';
-            const newpw = (document.getElementById('setting-v2pw') && document.getElementById('setting-v2pw').value) || '';
+            // Dashboard v2 has been removed; no v2 admin password to collect.
             const body = new URLSearchParams();
             body.append('title', title);
             body.append('favicon', fav);
