@@ -3,7 +3,13 @@ cd BlobeVM
 pip install textual
 sleep 2
 python3 installer.py
-docker build -t blobevm . --no-cache
+# Do not build the local Dockerfile (which uses an Ubuntu Jammy base).
+# Instead pull the Chrome VM image and tag it as `blobevm` so the
+# subsequent `docker run` uses only the Chrome image and no extra Jammy layers.
+BLOBEVM_IMAGE=${BLOBEVM_IMAGE:-kasmweb/chrome:1.16.1-rolling-daily}
+echo "Using image: $BLOBEVM_IMAGE"
+docker pull "$BLOBEVM_IMAGE" || true
+docker tag "$BLOBEVM_IMAGE" blobevm || true
 cd ..
 
 sudo apt update
