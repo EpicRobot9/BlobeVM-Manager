@@ -8,20 +8,9 @@ LABEL maintainer="mollomm1"
 
 ARG DEBIAN_FRONTEND="noninteractive"
 
-# prevent Ubuntu's firefox stub from being installed
-COPY /root/etc/apt/preferences.d/firefox-no-snap /etc/apt/preferences.d/firefox-no-snap
-
-COPY options.json /
-
-COPY /root/ /
-
 RUN \
-  echo "**** install packages ****" && \
-  add-apt-repository -y ppa:mozillateam/ppa && \
-  apt-get update && \
-  DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y firefox jq wget && \
-  echo "Skipping DE install for kasmweb/chrome base image" && \
-  echo "# DE already configured in base image"
+  echo "**** Skipping package installation for kasmweb/chrome base image ****" && \
+  echo "# Chrome and desktop environment already configured in base image"
 
 RUN \
   echo "**** Skipping app installation for kasmweb/chrome base image ****" && \
