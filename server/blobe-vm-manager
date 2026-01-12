@@ -404,6 +404,14 @@ run_container() {
     TITLE_ENV="EpicVM - ${name}"
   fi
 
+  local IMAGE="${BLOBEVM_IMAGE:-kasmweb/chrome:1.16.1-rolling-daily}"
+
+  # Ensure image is available locally; try to pull if missing
+  if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "Pulling image $IMAGE..."
+    docker pull "$IMAGE" || echo "Warning: failed to pull $IMAGE" >&2
+  fi
+
   docker run -d \
     --name "$cname" \
     --restart unless-stopped \
@@ -418,7 +426,7 @@ run_container() {
     ${net_args[@]:-} \
     ${kvm_args[@]} \
     $(common_labels "$name") \
-    "${BLOBEVM_IMAGE:-kasmweb/chrome:latest}" \
+    "$IMAGE" \
     >/dev/null
 }
 
@@ -654,7 +662,13 @@ cmd_delete_all_instances() {
 
 cmd_rebuild_image() {
   local ctx="${REPO_DIR:-/opt/blobe-vm}"
-  local image="${BLOBEVM_IMAGE:-kasmweb/chrome:latest}"
+  local image="${BLOBEVM_IMAGE:-kasmweb/chrome:1.16.1-rolling-daily}"
+  # If image name looks like an external image (contains '/'), skip building from local repo
+  if [[ "$image" == */* ]]; then
+    echo "Image '$image' appears to be an external image; skipping local build."
+    echo "To build from local repo, set BLOBEVM_IMAGE to a local name (e.g. 'blobevm:latest')."
+    return 0
+  fi
   [[ -d "$ctx" ]] || { echo "REPO_DIR not found: $ctx" >&2; exit 1; }
   echo "Building image '$image' from $ctx ..."
   docker build -t "$image" "$ctx"
