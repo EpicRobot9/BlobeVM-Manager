@@ -8,8 +8,19 @@ python3 installer.py
 # subsequent `docker run` uses only the Chrome image and no extra Jammy layers.
 BLOBEVM_IMAGE=${BLOBEVM_IMAGE:-kasmweb/chrome:1.16.1-rolling-daily}
 echo "Using image: $BLOBEVM_IMAGE"
-docker pull "$BLOBEVM_IMAGE" || true
-docker tag "$BLOBEVM_IMAGE" blobevm || true
+# Check whether the image already exists locally; if not, pull it.
+if docker image inspect "$BLOBEVM_IMAGE" >/dev/null 2>&1; then
+    echo "Image $BLOBEVM_IMAGE already present locally; skipping pull."
+else
+    echo "Pulling image $BLOBEVM_IMAGE..."
+    docker pull "$BLOBEVM_IMAGE" || true
+fi
+# Tag the image as `blobevm` if the tag does not already exist or points elsewhere.
+if ! docker image inspect blobevm >/dev/null 2>&1; then
+    docker tag "$BLOBEVM_IMAGE" blobevm || true
+else
+    echo "Local tag 'blobevm' already exists; leaving existing tag in place."
+fi
 cd ..
 
 sudo apt update

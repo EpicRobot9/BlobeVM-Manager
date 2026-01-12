@@ -1619,6 +1619,16 @@ try:
             app.add_url_rule(alias_rule, endpoint=f'dashboard_vm_wrapper_alias', view_func=dashboard_vm_wrapper, methods=['GET'])
         except Exception:
             pass
+    # Also ensure the common default path `/vm/<name>/` is registered so
+    # links coming from older dashboards or external sites still resolve
+    # even if reading the .env failed earlier.
+    try:
+        try:
+            app.add_url_rule('/vm/<name>/', endpoint='dashboard_vm_wrapper_vm', view_func=dashboard_vm_wrapper, methods=['GET'])
+        except Exception:
+            pass
+    except Exception:
+        pass
 except Exception:
     pass
 
