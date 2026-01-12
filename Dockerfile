@@ -1,9 +1,9 @@
-FROM ghcr.io/linuxserver/baseimage-kasmvnc:ubuntujammy
+FROM kasmweb/chrome:1.18.0-rolling-daily
 
 # set version label
 ARG BUILD_DATE
 ARG VERSION
-LABEL build_version="[Mollomm1 Mod] Linuxserver.io version:- ${VERSION} Build-date:- ${BUILD_DATE}"
+LABEL build_version="[Mollomm1 Mod] Kasm Chrome version:- ${VERSION} Build-date:- ${BUILD_DATE}"
 LABEL maintainer="mollomm1"
 
 ARG DEBIAN_FRONTEND="noninteractive"
@@ -20,13 +20,12 @@ RUN \
   add-apt-repository -y ppa:mozillateam/ppa && \
   apt-get update && \
   DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y firefox jq wget && \
-  chmod +x /install-de.sh && \
-  /install-de.sh
+  echo "Skipping DE install for kasmweb/chrome base image" && \
+  echo "# DE already configured in base image"
 
 RUN \
-  chmod +x /installapps.sh && \
-  /installapps.sh && \
-  rm /installapps.sh
+  echo "**** Skipping app installation for kasmweb/chrome base image ****" && \
+  echo "# Apps already configured in base image - Chrome and desktop environment ready"
 
 RUN \
   echo "**** cleanup ****" && \
