@@ -8,31 +8,17 @@ LABEL maintainer="mollomm1"
 
 ARG DEBIAN_FRONTEND="noninteractive"
 
-# prevent Ubuntu's firefox stub from being installed
-COPY /root/etc/apt/preferences.d/firefox-no-snap /etc/apt/preferences.d/firefox-no-snap
-
 COPY options.json /
 
-COPY /root/ /
-
 RUN \
-  echo "**** install packages ****" && \
-  add-apt-repository -y ppa:mozillateam/ppa && \
+  echo "**** install chrome ****" && \
   apt-get update && \
-  DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y firefox jq wget && \
-  chmod +x /install-de.sh && \
-  /install-de.sh
-
-RUN \
-  chmod +x /installapps.sh && \
-  /installapps.sh && \
-  rm /installapps.sh
-
-RUN \
-  echo "**** cleanup ****" && \
+  DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+    chromium-browser \
+    jq \
+    wget && \
   apt-get autoclean && \
   rm -rf \
-    /config/.cache \
     /var/lib/apt/lists/* \
     /var/tmp/* \
     /tmp/*
