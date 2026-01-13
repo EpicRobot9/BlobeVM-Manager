@@ -17,5 +17,5 @@ RUN \
   echo "# Apps already configured in base image - Chrome and desktop environment ready"
 
 # ports and volumes
-EXPOSE 4901
+EXPOSE 4902
 VOLUME /config
