@@ -18,7 +18,6 @@ RUN \
 
 RUN \
   echo "**** cleanup ****" && \
-  apt-get autoclean && \
   rm -rf \
     /config/.cache \
     /var/lib/apt/lists/* \
