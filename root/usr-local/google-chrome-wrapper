@@ -1,0 +1,4 @@
+#!/bin/sh
+# Wrapper for Chrome inside the blobevm image to ensure writable XDG dirs
+export XDG_CONFIG_HOME=/tmp/.config
+exec /usr/bin/google-chrome-stable --no-sandbox --disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --disable-setuid-sandbox --disable-breakpad --no-first-run --disable-extensions "$@" >> /tmp/google-chrome-launch.log 2>&1

@@ -36,6 +36,15 @@ RUN \
     /var/lib/apt/lists/* \
     /var/tmp/* \
     /tmp/*
+
+# Install chrome wrapper and update desktop file so launches use wrapper
+RUN \
+  if [ -f /root/usr-local/google-chrome-wrapper ]; then \
+    install -m 0755 /root/usr-local/google-chrome-wrapper /usr/local/bin/google-chrome-wrapper; \
+    sed -i 's|Exec=/usr/bin/google-chrome-stable .*%U|Exec=/usr/local/bin/google-chrome-wrapper %U|' /usr/share/applications/google-chrome.desktop || true; \
+    sed -i 's|Exec=/usr/bin/google-chrome-stable$|Exec=/usr/local/bin/google-chrome-wrapper|' /usr/share/applications/google-chrome.desktop || true; \
+    sed -i 's|Exec=/usr/bin/google-chrome-stable --incognito|Exec=/usr/local/bin/google-chrome-wrapper --incognito|' /usr/share/applications/google-chrome.desktop || true; \
+  fi
   
 # ports and volumes
 EXPOSE 3000
