@@ -16,14 +16,6 @@ RUN \
   echo "**** Skipping app installation for kasmweb/chrome base image ****" && \
   echo "# Apps already configured in base image - Chrome and desktop environment ready"
 
-RUN \
-  echo "**** cleanup ****" && \
-  rm -rf \
-    /config/.cache \
-    /var/lib/apt/lists/* \
-    /var/tmp/* \
-    /tmp/*
-  
 # ports and volumes
 EXPOSE 4901
 VOLUME /config
