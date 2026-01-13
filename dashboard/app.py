@@ -261,7 +261,7 @@ async function load(){
                 // merged: show /vm/<name> or domain
                 portOrPath = `${basePath}/${i.name}`;
                 if(customDomain){
-                    openUrl = `https://${customDomain}${basePath}/${i.name}/`;
+                    openUrl = `http://${customDomain}${basePath}/${i.name}/`;
                 }
             }else{
                 // direct: show port; always build link using current browser host
@@ -277,8 +277,9 @@ async function load(){
                     if (ms) portOrPath = ms[1];
                 }
                 if (portOrPath) {
+                    const proto = window.location.protocol;
                     const host = window.location.hostname;
-                    openUrl = `https://${host}:${portOrPath}/`;
+                    openUrl = `${proto}//${host}:${portOrPath}/`;
                 } else {
                     openUrl = '';
                 }
@@ -985,7 +986,7 @@ def _request_host():
 
 def _vm_host_port(cname: str) -> str:
     try:
-        r = _docker('port', cname, '4902/tcp')
+        r = _docker('port', cname, '3000/tcp')
         if r.returncode == 0 and r.stdout:
             line = r.stdout.strip().splitlines()[0]
             parts = line.rsplit(':', 1)
@@ -1006,7 +1007,7 @@ def _build_vm_url(name: str) -> str:
         cname = f'blobevm_{name}'
         hp = _vm_host_port(cname)
         if hp:
-            return f'https://{host}:{hp}/'
+            return f'http://{host}:{hp}/'
     # Fallback to manager-provided URL
     try:
         return subprocess.check_output([MANAGER, 'url', name], text=True).strip()
@@ -1048,7 +1049,7 @@ def manager_json_list():
                     if hp and hp.isdigit():
                         it['port'] = hp
                     if hp and host:
-                        it['url'] = f"https://{host}:{hp}/"
+                        it['url'] = f"http://{host}:{hp}/"
             # Apply transient statuses (e.g., rebuilding/updating)
             for it in instances:
                 try:
@@ -1099,7 +1100,7 @@ def manager_json_list():
                 except Exception:
                     hp = ''
             if hp and host:
-                url = f"https://{host}:{hp}/"
+                url = f"http://{host}:{hp}/"
             else:
                 # Fallback to manager per-VM URL (may be container IP, but last resort)
                 try:
