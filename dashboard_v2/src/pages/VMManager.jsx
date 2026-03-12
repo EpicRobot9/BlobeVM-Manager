@@ -5,11 +5,22 @@ import Modal from '../components/Modal'
 import VmExec from '../components/VmExec'
 import { useToasts } from '../components/ToastProvider'
 
+const PROFILE_OPTIONS = ['light', 'desktop', 'interactive', 'gaming', 'background', 'disposable']
+
 function toneFor(status){
   const s = (status || '').toLowerCase()
   if(s.includes('up') || s.includes('running') || s.includes('healthy')) return 'live'
   if(s.includes('rebuild') || s.includes('update')) return 'busy'
   return 'down'
+}
+
+function pressureTone(level){
+  switch((level || '').toLowerCase()){
+    case 'critical': return 'danger'
+    case 'pressured': return 'warn'
+    case 'warm': return 'warm'
+    default: return 'ok'
+  }
 }
 
 function StatusBadge({ status }){
@@ -43,10 +54,23 @@ function StatMeter({ label, value, tone='cpu' }){
   )
 }
 
-function VmCard({ vm, onAction, onDetails, busyAction }){
+function ProfileSelect({ value, disabled, onChange }){
+  return (
+    <select className="vm-profile-select" value={value || 'desktop'} disabled={disabled} onChange={e=>onChange(e.target.value)}>
+      {PROFILE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+    </select>
+  )
+}
+
+function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshing }){
   const tone = toneFor(vm.status)
+  const meta = vm._optimizer || {}
   return (
     <div className={`vm-card vm-card-${tone}`}>
+      <div className="vm-card-refresh" aria-hidden="true">
+        {refreshing ? <span className="vm-mini-spinner" /> : <span className="vm-refresh-idle" />}
+      </div>
+
       <div className="vm-card-top">
         <div>
           <div className="vm-card-name">{vm.name}</div>
@@ -56,13 +80,21 @@ function VmCard({ vm, onAction, onDetails, busyAction }){
       </div>
 
       <div className="vm-card-stats">
-        <StatMeter label="CPU" value={vm._stats?.cpu_percent ?? 0} tone="cpu" />
-        <StatMeter label="RAM" value={vm._stats?.mem_percent ?? 0} tone="ram" />
+        <StatMeter label="CPU" value={vm._stats?.cpu_percent ?? meta.cpuPercent ?? 0} tone="cpu" />
+        <StatMeter label="RAM" value={vm._stats?.mem_percent ?? meta.memPercent ?? 0} tone="ram" />
       </div>
 
       <div className="vm-card-meta">
         <div className="vm-meta-chip">Port: {vm.port || '—'}</div>
-        <div className="vm-meta-chip">Route: {tone === 'live' ? 'Ready' : 'Needs attention'}</div>
+        <div className="vm-meta-chip">Activity: {meta.activityClass || 'unknown'}</div>
+        <div className="vm-meta-chip">Pressure: {meta.pressure || 'low'}</div>
+        <div className="vm-meta-chip">Profile: {meta.profile || 'desktop'}</div>
+        {meta.protected && <div className="vm-meta-chip protected">Protected</div>}
+      </div>
+
+      <div className="vm-card-profile-row">
+        <span className="vm-profile-label">Profile</span>
+        <ProfileSelect value={meta.profile || 'desktop'} disabled={busyAction} onChange={(next)=>onProfileChange(vm.name, next)} />
       </div>
 
       <div className="vm-card-actions">
@@ -78,23 +110,40 @@ function VmCard({ vm, onAction, onDetails, busyAction }){
 export default function VMManager(){
   const { addToast } = useToasts()
   const [instances, setInstances] = useState([])
-  const [loading, setLoading] = useState(false)
+  const [initialLoading, setInitialLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [selected, setSelected] = useState(null)
   const [logs, setLogs] = useState('')
   const [logLoading, setLogLoading] = useState(false)
   const [announcement, setAnnouncement] = useState('')
   const [busyAction, setBusyAction] = useState('')
+  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, recommendations:[], vmStates:[], cfg:{} })
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
+  const didLoadOnceRef = useRef(false)
 
-  async function load(){
-    setLoading(true)
+  async function load({ silent = false } = {}){
+    if(silent && didLoadOnceRef.current){
+      setRefreshing(true)
+    } else {
+      setInitialLoading(true)
+    }
     try{
-      const [rList, rStats] = await Promise.all([apiFetch('/list'), apiFetch('/vm/stats').catch(()=>({ok:false}))])
+      const [rList, rStats, rOpt] = await Promise.all([
+        apiFetch('/list'),
+        apiFetch('/vm/stats').catch(()=>({ok:false})),
+        apiFetch('/optimizer/v2/summary').catch(()=>({ok:false}))
+      ])
       const j = await rList.json().catch(()=>({instances:[]}))
       const statJ = rStats && rStats.ok ? await rStats.json().catch(()=>({vms:{}})) : (rStats && typeof rStats.json === 'function' ? await rStats.json().catch(()=>({vms:{}})) : {vms:{}})
+      const optJ = rOpt && typeof rOpt.json === 'function' ? await rOpt.json().catch(()=>({ok:false})) : {ok:false}
       const statsMap = (statJ && statJ.vms) ? statJ.vms : {}
-      const insts = (j.instances || []).map(it => ({...it, _stats: statsMap[it.name] || statsMap[''+it.name] || statsMap[it.name]}))
+      const optimizerVmMap = Object.fromEntries(((optJ && optJ.vmStates) || []).map(v => [v.name, v]))
+      const insts = (j.instances || []).map(it => ({
+        ...it,
+        _stats: statsMap[it.name] || statsMap[''+it.name] || statsMap[it.name],
+        _optimizer: optimizerVmMap[it.name] || {}
+      }))
 
       try{
         const prev = prevStatsRef.current || {}
@@ -133,23 +182,26 @@ export default function VMManager(){
 
       prevStatsRef.current = statsMap || {}
       setInstances(insts)
+      if(optJ && optJ.ok) setOptimizer(optJ)
+      didLoadOnceRef.current = true
     }catch(e){
       console.error('load instances', e)
       addToast({ title:'Load failed', message:String(e), type:'error', timeout:8000 })
     }
-    setLoading(false)
+    setInitialLoading(false)
+    setRefreshing(false)
   }
 
   useEffect(()=>{
     let stopped = false
-    async function tick(){
+    async function tick(first = false){
       if(stopped) return
-      await load()
+      await load({ silent: !first })
       const ivMs = parseInt(localStorage.getItem('nbv2_update_interval') || '3000', 10)
       await new Promise(r=>setTimeout(r, Math.max(800, ivMs)))
-      if(!stopped) tick()
+      if(!stopped) tick(false)
     }
-    tick()
+    tick(true)
     return ()=>{ stopped = true }
   }, [])
 
@@ -157,6 +209,9 @@ export default function VMManager(){
     const key = `${cmd}:${name}`
     setBusyAction(key)
     try{
+      if(cmd === 'start'){
+        await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'start-click' }) }).catch(()=>null)
+      }
       const res = await apiFetch(`/${cmd}/${encodeURIComponent(name)}`, { method:'POST' })
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false){
@@ -168,11 +223,31 @@ export default function VMManager(){
       addToast({ title:`${name}`, message:String(e), type:'error', timeout:8000 })
     }
     setBusyAction('')
-    setTimeout(load, 800)
+    setTimeout(()=>load({ silent:true }), 800)
+  }
+
+  async function setProfile(name, profile){
+    const key = `profile:${name}`
+    setBusyAction(key)
+    try{
+      const res = await apiFetch(`/optimizer/profile/${encodeURIComponent(name)}`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ profile })
+      })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false) throw new Error(body.error || 'Failed to update profile')
+      addToast({ title:`${name}`, message:`Profile set to ${body.profile || profile}`, type:'success', timeout:5000 })
+      await load({ silent:true })
+    }catch(e){
+      addToast({ title:`${name}`, message:String(e), type:'error', timeout:8000 })
+    }
+    setBusyAction('')
   }
 
   async function openDetails(name){
     setSelected(name)
+    await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name)
   }
 
@@ -202,6 +277,9 @@ export default function VMManager(){
     return { total, live, down, busy }
   }, [instances])
 
+  const protectedCount = useMemo(()=>instances.filter(vm => vm._optimizer?.protected).length, [instances])
+  const hostPressure = optimizer.hostPressure || { level:'healthy', reasons:[] }
+
   return (
     <div>
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
@@ -209,24 +287,69 @@ export default function VMManager(){
         <div>
           <div className="eyebrow">Dashboard v2</div>
           <h1 style={{margin:'8px 0 10px'}}>VM Control Center</h1>
-          <div style={{color:'var(--muted)', maxWidth:760}}>Modernized VM management, live load telemetry, and quick actions for when one of your little desktop goblins decides to fall over.</div>
+          <div style={{color:'var(--muted)', maxWidth:760}}>Modernized VM management, live load telemetry, and the first pass of optimizer-aware policy so the host stops acting like every loud VM is automatically broken.</div>
         </div>
-        <div className="vm-summary-grid">
-          <div className="summary-pill"><strong>{summary.total}</strong><span>Total</span></div>
-          <div className="summary-pill live"><strong>{summary.live}</strong><span>Running</span></div>
-          <div className="summary-pill warn"><strong>{summary.busy}</strong><span>Busy</span></div>
-          <div className="summary-pill danger"><strong>{summary.down}</strong><span>Down</span></div>
+        <div style={{display:'flex', alignItems:'center', gap:14, flexWrap:'wrap'}}>
+          {refreshing && (
+            <div className="vm-refresh-banner">
+              <span className="vm-mini-spinner" />
+              <span>Refreshing fleet…</span>
+            </div>
+          )}
+          <div className="vm-summary-grid">
+            <div className="summary-pill"><strong>{summary.total}</strong><span>Total</span></div>
+            <div className="summary-pill live"><strong>{summary.live}</strong><span>Running</span></div>
+            <div className="summary-pill warn"><strong>{summary.busy}</strong><span>Busy</span></div>
+            <div className="summary-pill danger"><strong>{summary.down}</strong><span>Down</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div className="optimizer-grid" style={{marginTop:16}}>
+        <div className="glass-card optimizer-card">
+          <div className="optimizer-card-label">Host pressure</div>
+          <div className={`optimizer-pressure pressure-${pressureTone(hostPressure.level)}`}>{hostPressure.level || 'healthy'}</div>
+          <div className="optimizer-pressure-stats">
+            <div><strong>{Math.round(hostPressure.vmCpuTotal || 0)}%</strong><span>VM CPU total</span></div>
+            <div><strong>{hostPressure.availableMemoryMb || 0} MB</strong><span>Available RAM</span></div>
+            <div><strong>{hostPressure.swapPercent || 0}%</strong><span>Swap</span></div>
+          </div>
+          <div className="optimizer-reason-list">
+            {(hostPressure.reasons || []).length ? hostPressure.reasons.map((reason, idx)=><div key={idx}>{reason}</div>) : <div>No host pressure warnings.</div>}
+          </div>
+        </div>
+
+        <div className="glass-card optimizer-card">
+          <div className="optimizer-card-label">Optimizer policy</div>
+          <div className="optimizer-policy-grid">
+            <div><strong>{optimizer.cfg?.protectActiveVms ? 'On' : 'Off'}</strong><span>Protect active VMs</span></div>
+            <div><strong>{optimizer.cfg?.blockStartsOnPressure ? 'On' : 'Off'}</strong><span>Block starts on pressure</span></div>
+            <div><strong>{optimizer.cfg?.activityWindowSeconds || 0}s</strong><span>Active window</span></div>
+            <div><strong>{protectedCount}</strong><span>Protected VMs</span></div>
+          </div>
+        </div>
+
+        <div className="glass-card optimizer-card optimizer-card-wide">
+          <div className="optimizer-card-label">Recommendations</div>
+          <div className="optimizer-recommendations">
+            {(optimizer.recommendations || []).map((rec, idx)=>(
+              <div key={idx} className={`optimizer-rec rec-${rec.level || 'info'}`}>
+                <strong>{rec.title}</strong>
+                <span>{rec.detail}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
       <div className="glass-card" style={{marginTop:16}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12, flexWrap:'wrap'}}>
-          <div style={{color:'var(--muted)'}}>Manage your VMs, inspect logs, and jump into the wrapper view that now handles down/crashed states properly.</div>
-          <Button onClick={load}>Refresh</Button>
+          <div style={{color:'var(--muted)'}}>Manage your VMs, inspect logs, and start tagging them with real workload profiles so the optimizer can stop making baby-brain assumptions.</div>
+          <Button onClick={()=>load({ silent:true })}>Refresh</Button>
         </div>
 
         <div style={{marginTop:18}}>
-          {loading ? (
+          {initialLoading && instances.length === 0 ? (
             <div className="vm-card-grid">
               {Array.from({ length:4 }).map((_, i)=><div key={i} className="skeleton" style={{height:220,borderRadius:20}} />)}
             </div>
@@ -234,7 +357,7 @@ export default function VMManager(){
             <div className="vm-empty-state">No VMs found. Wow. An empty fleet. Very intimidating.</div>
           ) : (
             <div className="vm-card-grid">
-              {instances.map(vm => <VmCard key={vm.name} vm={vm} onAction={action} onDetails={openDetails} busyAction={!!busyAction} />)}
+              {instances.map(vm => <VmCard key={vm.name} vm={vm} onAction={action} onDetails={openDetails} onProfileChange={setProfile} busyAction={!!busyAction} refreshing={refreshing} />)}
             </div>
           )}
         </div>

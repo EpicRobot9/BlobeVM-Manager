@@ -24,6 +24,8 @@ RESTART_META_DIR = os.path.join(STATE_DIR, '.optimizer_restarts')
 LAST_RESTART_PATH = os.path.join(STATE_DIR, '.optimizer_last_restart')
 LAST_RUN_PATH = os.path.join(STATE_DIR, '.optimizer_last_run.json')
 ACTION_META_DIR = os.path.join(STATE_DIR, '.optimizer_actions')
+ACTIVITY_META_DIR = os.path.join(STATE_DIR, '.optimizer_activity')
+PROFILE_META_PATH = os.path.join(STATE_DIR, '.optimizer_profiles.json')
 
 DEFAULT_CFG = {
     'enabled': True,
@@ -36,6 +38,14 @@ DEFAULT_CFG = {
     'containerRestartCooldownMinutes': 10,
     'guardCooldownSeconds': 300,
     'maxActionsPerRun': 3,
+    'hostCpuSoftLimit': 75,
+    'hostCpuHardLimit': 90,
+    'minAvailableMemoryMb': 2048,
+    'maxSwapPercent': 10,
+    'protectActiveVms': True,
+    'activityWindowSeconds': 300,
+    'idleGraceSeconds': 1800,
+    'blockStartsOnPressure': True,
 }
 
 
@@ -84,6 +94,120 @@ def _docker_ps_names():
         return []
 
 
+def _list_vm_names():
+    names = set()
+    inst_root = os.path.join(STATE_DIR, 'instances')
+    try:
+        if os.path.isdir(inst_root):
+            for n in os.listdir(inst_root):
+                if os.path.isdir(os.path.join(inst_root, n)):
+                    names.add(n)
+    except Exception:
+        pass
+    for cname in _docker_ps_names():
+        if cname.startswith('blobevm_'):
+            names.add(cname[len('blobevm_'):])
+    return sorted(names)
+
+
+def _read_json_file(path, default):
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _write_json_file(path, payload):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(payload, f, indent=2)
+        return True
+    except Exception as e:
+        log(f'failed writing json file {path}: {e}')
+        return False
+
+
+def load_profiles():
+    data = _read_json_file(PROFILE_META_PATH, {})
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def set_vm_profile(name: str, profile: str):
+    profile = (profile or 'desktop').strip().lower()
+    allowed = {'light', 'desktop', 'interactive', 'gaming', 'background', 'disposable'}
+    if profile not in allowed:
+        profile = 'desktop'
+    profiles = load_profiles()
+    profiles[name] = profile
+    _write_json_file(PROFILE_META_PATH, profiles)
+    return profile
+
+
+def note_vm_activity(name: str, source: str = 'unknown'):
+    try:
+        os.makedirs(ACTIVITY_META_DIR, exist_ok=True)
+        path = os.path.join(ACTIVITY_META_DIR, re.sub(r'[^A-Za-z0-9_.-]', '_', name) + '.json')
+        payload = {
+            'name': name,
+            'source': source,
+            'lastActivityTs': int(time.time()),
+        }
+        _write_json_file(path, payload)
+        return True
+    except Exception:
+        return False
+
+
+def _activity_payload(name: str):
+    path = os.path.join(ACTIVITY_META_DIR, re.sub(r'[^A-Za-z0-9_.-]', '_', name) + '.json')
+    data = _read_json_file(path, {})
+    if not isinstance(data, dict):
+        data = {}
+    return data
+
+
+def _derive_host_pressure(stats: dict, cfg: dict):
+    mem = stats.get('mem') or {}
+    swap = stats.get('swap') or {}
+    available = mem.get('available', max(0, int(mem.get('total', 0)) - int(mem.get('used', 0))))
+    available_mb = int(available / 1024 / 1024) if available else 0
+    cpu_values = [float(c.get('cpu') or 0.0) for c in (stats.get('containers') or []) if str(c.get('name', '')).startswith('blobevm_')]
+    vm_cpu_total = sum(cpu_values)
+    swap_total = int(swap.get('total') or 0)
+    swap_used = int(swap.get('used') or 0)
+    swap_percent = int(round((swap_used / swap_total) * 100)) if swap_total else 0
+    score = 0
+    reasons = []
+    if vm_cpu_total >= float(cfg.get('hostCpuHardLimit', 90)):
+        score += 3; reasons.append(f'vm cpu {vm_cpu_total:.1f}% >= hard limit')
+    elif vm_cpu_total >= float(cfg.get('hostCpuSoftLimit', 75)):
+        score += 2; reasons.append(f'vm cpu {vm_cpu_total:.1f}% >= soft limit')
+    if available_mb and available_mb <= int(cfg.get('minAvailableMemoryMb', 2048)):
+        score += 2; reasons.append(f'available memory {available_mb}MB below reserve')
+    if swap_percent >= int(cfg.get('maxSwapPercent', 10)):
+        score += 3; reasons.append(f'swap {swap_percent}% >= max')
+    if score >= 5:
+        level = 'critical'
+    elif score >= 3:
+        level = 'pressured'
+    elif score >= 1:
+        level = 'warm'
+    else:
+        level = 'healthy'
+    return {
+        'level': level,
+        'score': score,
+        'reasons': reasons,
+        'vmCpuTotal': round(vm_cpu_total, 2),
+        'availableMemoryMb': available_mb,
+        'swapPercent': swap_percent,
+    }
+
+
 def gather_stats():
     out = {'mem': {}, 'swap': {}, 'containers': []}
     # free -b
@@ -95,6 +219,8 @@ def gather_stats():
         if len(parts) >= 3:
             out['mem']['total'] = int(parts[1])
             out['mem']['used'] = int(parts[2])
+            if len(parts) >= 7:
+                out['mem']['available'] = int(parts[6])
         swapLine = next((l for l in lines if l.lower().startswith('swap:')), '')
         sp = re.split(r'\s+', swapLine.strip()) if swapLine else []
         if len(sp) >= 3:
@@ -416,15 +542,100 @@ def _run_health_guard(cfg):
     return None
 
 
+def _derive_vm_states(cfg: dict, stats: dict):
+    profiles = load_profiles()
+    by_name = {}
+    for c in stats.get('containers') or []:
+        name = str(c.get('name') or '')
+        if name.startswith('blobevm_'):
+            by_name[name[len('blobevm_'):]] = c
+    now = int(time.time())
+    active_window = int(cfg.get('activityWindowSeconds', 300))
+    idle_grace = int(cfg.get('idleGraceSeconds', 1800))
+    states = []
+    for name in _list_vm_names():
+        c = by_name.get(name) or {}
+        activity = _activity_payload(name)
+        last_activity = int(activity.get('lastActivityTs') or 0)
+        age = max(0, now - last_activity) if last_activity else None
+        profile = profiles.get(name, 'desktop')
+        activity_class = 'idle'
+        protected = False
+        if age is not None and age <= active_window:
+            activity_class = 'active'
+            protected = bool(cfg.get('protectActiveVms', True)) or profile in ('interactive', 'gaming')
+        elif profile in ('interactive', 'gaming') and age is not None and age <= idle_grace:
+            activity_class = 'warm'
+            protected = bool(cfg.get('protectActiveVms', True))
+        pressure = 'low'
+        cpu = float(c.get('cpu') or 0.0)
+        mem = float(c.get('memperc') or 0.0)
+        if cpu >= 85 or mem >= 90:
+            pressure = 'high'
+        elif cpu >= 60 or mem >= 75:
+            pressure = 'medium'
+        state = {
+            'name': name,
+            'profile': profile,
+            'activityClass': activity_class,
+            'protected': protected,
+            'lastActivityTs': last_activity,
+            'secondsSinceActivity': age,
+            'cpuPercent': round(cpu, 2),
+            'memPercent': round(mem, 2),
+            'pressure': pressure,
+            'running': bool(c),
+        }
+        states.append(state)
+    return states
+
+
+def _build_recommendations(cfg: dict, stats: dict, vm_states, host_pressure):
+    recs = []
+    if host_pressure.get('level') in ('pressured', 'critical'):
+        recs.append({
+            'level': 'warn',
+            'title': 'Host pressure is elevated',
+            'detail': '; '.join(host_pressure.get('reasons') or ['pressure increasing'])
+        })
+    idle_background = [v for v in vm_states if v.get('activityClass') == 'idle' and v.get('profile') in ('background', 'disposable') and v.get('running')]
+    if idle_background and host_pressure.get('level') in ('pressured', 'critical'):
+        recs.append({
+            'level': 'info',
+            'title': 'Stop idle background VMs before disruptive recovery',
+            'detail': 'Candidates: ' + ', '.join(v['name'] for v in idle_background[:4])
+        })
+    protected_hot = [v for v in vm_states if v.get('protected') and v.get('pressure') == 'high']
+    if protected_hot:
+        recs.append({
+            'level': 'info',
+            'title': 'Protected active VMs are consuming heavy resources',
+            'detail': 'Consider increasing host headroom or lowering VM density for: ' + ', '.join(v['name'] for v in protected_hot[:4])
+        })
+    unknown_profiles = [v['name'] for v in vm_states if v.get('profile') == 'desktop']
+    if unknown_profiles:
+        recs.append({
+            'level': 'info',
+            'title': 'Assign explicit VM profiles',
+            'detail': 'Still using default desktop profile: ' + ', '.join(unknown_profiles[:5])
+        })
+    if not recs:
+        recs.append({'level': 'ok', 'title': 'No optimizer recommendations right now', 'detail': 'Host pressure is stable and VM activity looks calm.'})
+    return recs[:6]
+
+
 def run_once():
     cfg = load_config()
     events = []
     max_actions = max(1, int(cfg.get('maxActionsPerRun', 3)))
     try:
+        pre_stats = gather_stats()
+        host_pressure = _derive_host_pressure(pre_stats, cfg)
+        vm_states = _derive_vm_states(cfg, pre_stats)
         guards = []
         if cfg.get('guards', {}).get('memory'):
             guards.append(_run_memory_guard)
-        if cfg.get('guards', {}).get('cpu'):
+        if cfg.get('guards', {}).get('cpu') and host_pressure.get('level') != 'critical':
             guards.append(_run_cpu_guard)
         if cfg.get('guards', {}).get('swap'):
             guards.append(_run_swap_guard)
@@ -442,9 +653,17 @@ def run_once():
                 enforce_strict_memory(cfg)
             except Exception as e:
                 log(f'error enforcing strictMemoryLimit: {e}')
+        post_stats = gather_stats()
+        payload_stats = {
+            'raw': post_stats,
+            'hostPressure': _derive_host_pressure(post_stats, cfg),
+            'vmStates': _derive_vm_states(cfg, post_stats),
+            'recommendations': _build_recommendations(cfg, post_stats, _derive_vm_states(cfg, post_stats), _derive_host_pressure(post_stats, cfg)),
+        }
     except Exception as e:
         log(f'error in run_once: {e}')
-    _record_last_run(events, gather_stats())
+        payload_stats = {'raw': gather_stats()}
+    _record_last_run(events, payload_stats)
     return events
 
 
@@ -482,7 +701,16 @@ def start_background_loop():
 
 def status():
     cfg = load_config()
-    stats = gather_stats()
+    raw_stats = gather_stats()
+    host_pressure = _derive_host_pressure(raw_stats, cfg)
+    vm_states = _derive_vm_states(cfg, raw_stats)
+    stats = {
+        'raw': raw_stats,
+        'hostPressure': host_pressure,
+        'vmStates': vm_states,
+        'recommendations': _build_recommendations(cfg, raw_stats, vm_states, host_pressure),
+        'profiles': load_profiles(),
+    }
     last = 0
     last_run = {}
     try:

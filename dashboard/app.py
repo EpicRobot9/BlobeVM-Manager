@@ -1550,70 +1550,6 @@ def api_upload_vm_favicon(name):
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
-    # --- Dashboard v2 static serving and auth endpoints ---
-    @app.post('/Dashboard/api/auth/login')
-    def dashboard_v2_login():
-        try:
-            data = request.get_json(force=True)
-        except Exception:
-            return jsonify({'ok': False}), 400
-        pw = data.get('password','')
-        cfg_pw = _get_v2_password()
-        if not cfg_pw:
-            # not configured
-            return jsonify({'ok': False, 'error': 'not-configured'}), 404
-        if pw != cfg_pw:
-            return jsonify({'ok': False, 'error': 'invalid'}), 401
-        exp = int(time.time() + 24*3600)
-        payload = f"{exp}:{os.urandom(8).hex()}"
-        token = _sign_v2_token(payload)
-        resp = jsonify({'ok': True, 'token': token, 'expiry': exp})
-        # Also set cookie for browser convenience
-        resp.set_cookie('Dashboard-Auth', token, httponly=True, samesite='Lax')
-        return resp
-
-
-    @app.get('/Dashboard/api/auth/status')
-    def dashboard_v2_status():
-        # Check Authorization header or cookie
-        auth = request.headers.get('Authorization','')
-        token = None
-        if auth.lower().startswith('bearer '):
-            token = auth.split(None,1)[1].strip()
-        if not token:
-            token = request.cookies.get('Dashboard-Auth')
-        ok = bool(token and _verify_v2_token(token))
-        return jsonify({'ok': ok})
-
-
-    @app.route('/Dashboard')
-    @app.route('/Dashboard/', defaults={'path': ''})
-    @app.route('/Dashboard/<path:path>')
-    def serve_dashboard_v2(path=''):
-        # Serve built files from dashboard_v2/dist if present, otherwise serve dev index
-        base = os.path.join(_state_dir(), 'dashboard_v2')
-        dist = os.path.join(base, 'dist')
-        # If requested file exists under dist, serve it
-        if path:
-            cand = os.path.join(dist, path)
-            if os.path.isfile(cand):
-                return send_from_directory(dist, path)
-            # try nested static path
-            static_dir = os.path.join(base, 'src')
-            cand2 = os.path.join(static_dir, path)
-            if os.path.isfile(cand2):
-                return send_from_directory(static_dir, path)
-        # Serve dist index if available
-        indexcand = os.path.join(dist, 'index.html')
-        if os.path.isfile(indexcand):
-            return send_from_directory(dist, 'index.html')
-        # Fallback to dev index.html in project
-        dev_index = os.path.join(base, 'index.html')
-        if os.path.isfile(dev_index):
-            return send_from_directory(base, 'index.html')
-        return 'Dashboard v2 not built', 404
-
-
     # Serve dashboard v2 production assets requested from absolute `/assets/*` paths
     @app.route('/assets/<path:path>')
     def serve_dashboard_v2_root_assets(path):
@@ -1635,6 +1571,39 @@ def api_upload_vm_favicon(name):
         if os.path.isfile(cand):
             return send_from_directory(assets_dir, path)
         return 'Not found', 404
+
+
+# --- Dashboard v2 auth routes (top-level) ---
+@app.post('/Dashboard/api/auth/login')
+def dashboard_v2_login_public():
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({'ok': False}), 400
+    pw = data.get('password','') if isinstance(data, dict) else ''
+    cfg_pw = _get_v2_password()
+    if not cfg_pw:
+        return jsonify({'ok': False, 'error': 'not-configured'}), 404
+    if pw != cfg_pw:
+        return jsonify({'ok': False, 'error': 'invalid'}), 401
+    exp = int(time.time() + 24*3600)
+    payload = f"{exp}:{os.urandom(8).hex()}"
+    token = _sign_v2_token(payload)
+    resp = jsonify({'ok': True, 'token': token, 'expiry': exp})
+    resp.set_cookie('Dashboard-Auth', token, httponly=True, samesite='Lax')
+    return resp
+
+
+@app.get('/Dashboard/api/auth/status')
+def dashboard_v2_status_public():
+    auth = request.headers.get('Authorization','')
+    token = None
+    if auth.lower().startswith('bearer '):
+        token = auth.split(None,1)[1].strip()
+    if not token:
+        token = request.cookies.get('Dashboard-Auth')
+    ok = bool(token and _verify_v2_token(token))
+    return jsonify({'ok': ok})
 
 
 # --- Dashboard v2 static page routes (top-level) ---
@@ -1733,6 +1702,10 @@ def dashboard_vm_favicon(name):
 
 @app.get('/dashboard/vm/<name>/')
 def dashboard_vm_wrapper(name):
+        try:
+                dash_optimizer.note_vm_activity(name, 'wrapper-open')
+        except Exception:
+                pass
         # Public wrapper page that opens the VM inside an iframe while setting the tab title and favicon.
         # We render a small client-side React app that will show either the iframe (when VM is running)
         # or a full-screen fallback UI when the VM is stopped/unreachable.
@@ -2946,6 +2919,51 @@ def api_optimizer_status():
     try:
         s = dash_optimizer.status()
         return jsonify({'ok': True, 'cfg': s.get('cfg'), 'stats': s.get('stats'), 'lastRestart': s.get('lastRestart'), 'lastRun': s.get('lastRun')})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/optimizer/v2/summary')
+@auth_required
+def api_optimizer_v2_summary():
+    try:
+        s = dash_optimizer.status()
+        stats = s.get('stats') or {}
+        return jsonify({
+            'ok': True,
+            'hostPressure': stats.get('hostPressure') or {},
+            'vmStates': stats.get('vmStates') or [],
+            'recommendations': stats.get('recommendations') or [],
+            'profiles': stats.get('profiles') or {},
+            'cfg': s.get('cfg') or {},
+            'lastRun': s.get('lastRun') or {},
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/optimizer/profile/<name>')
+@auth_required
+def api_optimizer_profile(name):
+    try:
+        data = request.get_json(silent=True) or {}
+        profile = data.get('profile') if isinstance(data, dict) else None
+        if not profile:
+            return jsonify({'ok': False, 'error': 'missing profile'}), 400
+        chosen = dash_optimizer.set_vm_profile(name, profile)
+        return jsonify({'ok': True, 'name': name, 'profile': chosen})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/optimizer/activity/<name>')
+@auth_required
+def api_optimizer_activity(name):
+    try:
+        data = request.get_json(silent=True) or {}
+        source = (data.get('source') if isinstance(data, dict) else None) or 'dashboard-api'
+        dash_optimizer.note_vm_activity(name, source)
+        return jsonify({'ok': True, 'name': name, 'source': source})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
