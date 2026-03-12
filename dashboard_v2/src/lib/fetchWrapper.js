@@ -1,6 +1,7 @@
 import { setToken as setTok, getToken } from './auth'
 
 const API_BASE = '/dashboard/api'
+const AUTH_BASE = '/Dashboard/api'
 
 export async function apiFetch(path, opts={}){
   const headers = opts.headers || {}
@@ -13,7 +14,7 @@ export async function apiFetch(path, opts={}){
 }
 
 export async function login(password){
-  const res = await fetch(API_BASE + '/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password})})
+  const res = await fetch(AUTH_BASE + '/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password})})
   if(!res.ok) return false
   const j = await res.json().catch(()=>({}))
   if(j && j.token){ setTok(j.token); return true }
