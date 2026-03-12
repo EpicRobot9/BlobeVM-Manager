@@ -27,6 +27,7 @@ ACTION_META_DIR = os.path.join(STATE_DIR, '.optimizer_actions')
 ACTIVITY_META_DIR = os.path.join(STATE_DIR, '.optimizer_activity')
 PROFILE_META_PATH = os.path.join(STATE_DIR, '.optimizer_profiles.json')
 HISTORY_META_PATH = os.path.join(STATE_DIR, '.optimizer_history.json')
+TREND_META_PATH = os.path.join(STATE_DIR, '.optimizer_trends.json')
 
 DEFAULT_CFG = {
     'enabled': True,
@@ -222,6 +223,41 @@ def _record_history_event(event: dict):
         _save_history_state(data)
     except Exception as e:
         log(f'failed recording history event: {e}')
+
+
+def _trend_state():
+    data = _read_json_file(TREND_META_PATH, {'points': []})
+    if not isinstance(data, dict):
+        data = {'points': []}
+    data.setdefault('points', [])
+    return data
+
+
+def _record_trend_point(host_pressure: dict, capacity: dict, vm_states):
+    try:
+        data = _trend_state()
+        point = {
+            'ts': int(time.time()),
+            'pressureLevel': host_pressure.get('level'),
+            'pressureScore': host_pressure.get('score'),
+            'vmCpuTotal': host_pressure.get('vmCpuTotal'),
+            'availableMemoryMb': host_pressure.get('availableMemoryMb'),
+            'swapPercent': host_pressure.get('swapPercent'),
+            'gamingSuitability': capacity.get('gamingSuitability'),
+            'estimatedAdditionalGamingSlots': capacity.get('estimatedAdditionalGamingSlots'),
+            'estimatedAdditionalInteractiveSlots': capacity.get('estimatedAdditionalInteractiveSlots'),
+            'activeVmCount': capacity.get('activeVmCount'),
+            'interactiveVmCount': capacity.get('interactiveVmCount'),
+            'gamingVmCount': capacity.get('gamingVmCount'),
+            'unstableVmCount': len([v for v in (vm_states or []) if v.get('unstable')]),
+            'recoveringVmCount': len([v for v in (vm_states or []) if str(v.get('recoveryState', '')).startswith('recover') or 'restart' in str(v.get('recoveryState', '')) or 'degraded' in str(v.get('recoveryState', ''))]),
+        }
+        pts = list(data.get('points') or [])
+        pts.append(point)
+        data['points'] = pts[-180:]
+        _write_json_file(TREND_META_PATH, data)
+    except Exception as e:
+        log(f'failed recording trend point: {e}')
 
 
 def _derive_host_pressure(stats: dict, cfg: dict):
@@ -907,13 +943,16 @@ def run_once():
         post_stats = gather_stats()
         post_host_pressure = _derive_host_pressure(post_stats, cfg)
         post_vm_states = _derive_vm_states(cfg, post_stats)
+        post_capacity = _estimate_capacity(cfg, post_stats, post_vm_states, post_host_pressure)
+        _record_trend_point(post_host_pressure, post_capacity, post_vm_states)
         payload_stats = {
             'raw': post_stats,
             'hostPressure': post_host_pressure,
             'vmStates': post_vm_states,
-            'capacity': _estimate_capacity(cfg, post_stats, post_vm_states, post_host_pressure),
+            'capacity': post_capacity,
             'recommendations': _build_recommendations(cfg, post_stats, post_vm_states, post_host_pressure),
             'history': _history_state(),
+            'trends': _trend_state(),
         }
     except Exception as e:
         log(f'error in run_once: {e}')
@@ -967,6 +1006,7 @@ def status():
         'recommendations': _build_recommendations(cfg, raw_stats, vm_states, host_pressure),
         'profiles': load_profiles(),
         'history': _history_state(),
+        'trends': _trend_state(),
     }
     last = 0
     last_run = {}

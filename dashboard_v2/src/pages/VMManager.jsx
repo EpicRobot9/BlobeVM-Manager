@@ -145,8 +145,9 @@ export default function VMManager(){
   const [announcement, setAnnouncement] = useState('')
   const [busyAction, setBusyAction] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [detailOpen, setDetailOpen] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState({})
-  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, capacity:{}, recommendations:[], vmStates:[], cfg:{}, history:{ events:[], vms:{} } })
+  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, capacity:{}, recommendations:[], vmStates:[], cfg:{}, history:{ events:[], vms:{} }, trends:{ points:[] } })
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
   const didLoadOnceRef = useRef(false)
@@ -397,7 +398,13 @@ export default function VMManager(){
   const recoveringCount = useMemo(()=>instances.filter(vm => String(vm._optimizer?.recoveryState || '').includes('recover') || String(vm._optimizer?.recoveryState || '').includes('restart') || String(vm._optimizer?.recoveryState || '').includes('degraded')).length, [instances])
   const hostPressure = optimizer.hostPressure || { level:'healthy', reasons:[] }
   const capacity = optimizer.capacity || {}
+  const trendPoints = (optimizer.trends && optimizer.trends.points ? optimizer.trends.points : []).slice(-24)
   const recentEvents = (optimizer.history && optimizer.history.events ? optimizer.history.events : []).slice(-8).reverse()
+  const unstableVms = instances.filter(vm => vm._optimizer?.unstable)
+  const degradedVms = instances.filter(vm => {
+    const rs = String(vm._optimizer?.recoveryState || '')
+    return rs.includes('degraded') || rs.includes('recover') || rs.includes('restart')
+  })
 
   return (
     <div>
@@ -466,6 +473,7 @@ export default function VMManager(){
           </div>
           <div className="optimizer-policy-actions">
             <Button onClick={()=>setSettingsOpen(true)}>Tune policy</Button>
+            <Button onClick={()=>setDetailOpen(true)}>Open detail view</Button>
             <Button onClick={()=>optimizerSet('protectActiveVms', !optimizer.cfg?.protectActiveVms)}>{optimizer.cfg?.protectActiveVms ? 'Disable' : 'Enable'} protection</Button>
           </div>
         </div>
@@ -493,6 +501,19 @@ export default function VMManager(){
             )) : <div className="optimizer-event-empty">No recent optimizer actions recorded yet.</div>}
           </div>
         </div>
+
+        <div className="glass-card optimizer-card optimizer-card-wide">
+          <div className="optimizer-card-label">Pressure trend</div>
+          <div className="optimizer-trend-grid">
+            {trendPoints.length ? trendPoints.map((pt, idx)=>(
+              <div key={idx} className={`trend-bar level-${pressureTone(pt.pressureLevel)}`} title={`cpu ${Math.round(pt.vmCpuTotal || 0)} · ram ${pt.availableMemoryMb || 0}MB · swap ${pt.swapPercent || 0}%`} style={{ height: `${Math.max(18, Math.min(100, Number(pt.vmCpuTotal || 0)))}px` }} />
+            )) : <div className="optimizer-event-empty">No trend points yet.</div>}
+          </div>
+          <div className="optimizer-trend-legend">
+            <span>Recent host pressure over time</span>
+            <span>{trendPoints.length} points</span>
+          </div>
+        </div>
       </div>
 
       <div className="glass-card" style={{marginTop:16}}>
@@ -515,6 +536,35 @@ export default function VMManager(){
           )}
         </div>
       </div>
+
+      <Modal open={detailOpen} title="Optimizer detail view" onClose={()=>setDetailOpen(false)} width={1100}>
+        <div className="optimizer-detail-grid">
+          <div className="glass-subcard">
+            <div className="optimizer-card-label">Unstable VMs</div>
+            <div className="detail-list">
+              {unstableVms.length ? unstableVms.map(vm => <div key={vm.name} className="detail-item"><strong>{vm.name}</strong><span>{vm._optimizer?.lastReason || 'Repeated interventions detected'}</span></div>) : <div className="optimizer-event-empty">No unstable VMs right now.</div>}
+            </div>
+          </div>
+          <div className="glass-subcard">
+            <div className="optimizer-card-label">Recovery states</div>
+            <div className="detail-list">
+              {degradedVms.length ? degradedVms.map(vm => <div key={vm.name} className="detail-item"><strong>{vm.name}</strong><span>{vm._optimizer?.recoveryState || 'unknown'}</span></div>) : <div className="optimizer-event-empty">No degraded or recovering VMs right now.</div>}
+            </div>
+          </div>
+          <div className="glass-subcard detail-span-2">
+            <div className="optimizer-card-label">Recent actions</div>
+            <div className="detail-list">
+              {recentEvents.length ? recentEvents.map((ev, idx)=><div key={idx} className="detail-item"><strong>{ev.vm || ev.name || ev.container || 'host'}</strong><span>{ev.action || 'event'}{ev.reason ? ` · ${ev.reason}` : ''}</span></div>) : <div className="optimizer-event-empty">No recent optimizer actions recorded yet.</div>}
+            </div>
+          </div>
+          <div className="glass-subcard detail-span-2">
+            <div className="optimizer-card-label">Trend snapshots</div>
+            <div className="detail-list">
+              {trendPoints.length ? [...trendPoints].reverse().slice(0, 12).map((pt, idx)=><div key={idx} className="detail-item"><strong>{new Date((pt.ts || 0) * 1000).toLocaleTimeString()}</strong><span>{pt.pressureLevel || 'healthy'} · CPU {Math.round(pt.vmCpuTotal || 0)}% · RAM {pt.availableMemoryMb || 0}MB · swap {pt.swapPercent || 0}% · gaming {pt.gamingSuitability || 'good'}</span></div>) : <div className="optimizer-event-empty">No trend snapshots recorded yet.</div>}
+            </div>
+          </div>
+        </div>
+      </Modal>
 
       <Modal open={settingsOpen} title="Optimizer policy" onClose={()=>setSettingsOpen(false)} width={860}>
         <div className="optimizer-settings-grid">

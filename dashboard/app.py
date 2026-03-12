@@ -2974,6 +2974,7 @@ def api_optimizer_v2_summary():
             'recommendations': stats.get('recommendations') or [],
             'profiles': stats.get('profiles') or {},
             'history': stats.get('history') or {},
+            'trends': stats.get('trends') or {},
             'cfg': s.get('cfg') or {},
             'lastRun': s.get('lastRun') or {},
         })
