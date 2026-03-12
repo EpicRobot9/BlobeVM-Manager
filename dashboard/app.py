@@ -1559,11 +1559,12 @@ def api_upload_vm_favicon(name):
         return jsonify({'ok': ok})
 
 
+    @app.route('/Dashboard')
     @app.route('/Dashboard/', defaults={'path': ''})
     @app.route('/Dashboard/<path:path>')
-    def serve_dashboard_v2(path):
+    def serve_dashboard_v2(path=''):
         # Serve built files from dashboard_v2/dist if present, otherwise serve dev index
-        base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+        base = os.path.join(_state_dir(), 'dashboard_v2')
         dist = os.path.join(base, 'dist')
         # If requested file exists under dist, serve it
         if path:
@@ -1589,7 +1590,7 @@ def api_upload_vm_favicon(name):
     # Serve dashboard v2 production assets requested from absolute `/assets/*` paths
     @app.route('/assets/<path:path>')
     def serve_dashboard_v2_root_assets(path):
-        base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+        base = os.path.join(_state_dir(), 'dashboard_v2')
         assets_dir = os.path.join(base, 'dist', 'assets')
         cand = os.path.join(assets_dir, path)
         if os.path.isfile(cand):
@@ -1601,12 +1602,56 @@ def api_upload_vm_favicon(name):
     # Also handle requests that include the Dashboard prefix explicitly
     @app.route('/Dashboard/assets/<path:path>')
     def serve_dashboard_v2_prefixed_assets(path):
-        base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+        base = os.path.join(_state_dir(), 'dashboard_v2')
         assets_dir = os.path.join(base, 'dist', 'assets')
         cand = os.path.join(assets_dir, path)
         if os.path.isfile(cand):
             return send_from_directory(assets_dir, path)
         return 'Not found', 404
+
+
+# --- Dashboard v2 static page routes (top-level) ---
+@app.route('/Dashboard')
+@app.route('/Dashboard/', defaults={'path': ''})
+@app.route('/Dashboard/<path:path>')
+def serve_dashboard_v2_public(path=''):
+    base = os.path.join(_state_dir(), 'dashboard_v2')
+    dist = os.path.join(base, 'dist')
+    if path:
+        cand = os.path.join(dist, path)
+        if os.path.isfile(cand):
+            return send_from_directory(dist, path)
+        static_dir = os.path.join(base, 'src')
+        cand2 = os.path.join(static_dir, path)
+        if os.path.isfile(cand2):
+            return send_from_directory(static_dir, path)
+    indexcand = os.path.join(dist, 'index.html')
+    if os.path.isfile(indexcand):
+        return send_from_directory(dist, 'index.html')
+    dev_index = os.path.join(base, 'index.html')
+    if os.path.isfile(dev_index):
+        return send_from_directory(base, 'index.html')
+    return 'Dashboard v2 not built', 404
+
+
+@app.route('/assets/<path:path>')
+def serve_dashboard_v2_root_assets_public(path):
+    base = os.path.join(_state_dir(), 'dashboard_v2')
+    assets_dir = os.path.join(base, 'dist', 'assets')
+    cand = os.path.join(assets_dir, path)
+    if os.path.isfile(cand):
+        return send_from_directory(assets_dir, path)
+    return 'Not found', 404
+
+
+@app.route('/Dashboard/assets/<path:path>')
+def serve_dashboard_v2_prefixed_assets_public(path):
+    base = os.path.join(_state_dir(), 'dashboard_v2')
+    assets_dir = os.path.join(base, 'dist', 'assets')
+    cand = os.path.join(assets_dir, path)
+    if os.path.isfile(cand):
+        return send_from_directory(assets_dir, path)
+    return 'Not found', 404
 
 
 @app.post('/dashboard/api/set-vm-title/<name>')

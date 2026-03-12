@@ -89,19 +89,41 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
   docker rm -f "$NAME" >/dev/null 2>&1 || true
 fi
 
-docker run -d --name "$NAME" --restart unless-stopped \
-  -p "${DASHBOARD_PORT}:5000" \
-  -v "$STATE_DIR:/opt/blobe-vm" \
-  -v /var/blobe:/var/blobe \
-  -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
-  -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$STATE_DIR/dashboard:/app:ro" \
-  -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
-  -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
-  -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
-  python:3.11-slim \
-    bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
-  >/dev/null
+NET_ARGS=()
+if docker network inspect proxy >/dev/null 2>&1; then
+  NET_ARGS+=(--network proxy)
+  NET_ARGS+=(--label 'traefik.enable=true')
+  NET_ARGS+=(--label 'com.blobevm.managed=1')
+  NET_ARGS+=(--label 'traefik.docker.network=proxy')
+  NET_ARGS+=(--label 'traefik.http.services.blobedash.loadbalancer.server.port=5000')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedash.rule=PathPrefix(`/dashboard`)')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedash.entrypoints=web')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedash.service=blobedash')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedash-secure.rule=PathPrefix(`/dashboard`)')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedash-secure.entrypoints=websecure')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedash-secure.service=blobedash')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedash-secure.tls=true')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedash-secure.tls.certresolver=myresolver')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedashv2.rule=PathPrefix(`/Dashboard`)')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedashv2.entrypoints=web')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedashv2.service=blobedash')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedashv2-secure.rule=PathPrefix(`/Dashboard`)')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedashv2-secure.entrypoints=websecure')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedashv2-secure.service=blobedash')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedashv2-secure.tls=true')
+  NET_ARGS+=(--label 'traefik.http.routers.blobedashv2-secure.tls.certresolver=myresolver')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.rule=PathPrefix(`/vm/`)')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.entrypoints=web')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.service=blobedash')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.priority=5000')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.rule=PathPrefix(`/vm/`)')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.entrypoints=websecure')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.service=blobedash')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.tls=true')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.priority=5000')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.tls.certresolver=myresolver')
+fi
+
+docker run -d --name "$NAME" --restart unless-stopped   -p "${DASHBOARD_PORT}:5000"   ${NET_ARGS[@]}   -v "$STATE_DIR:/opt/blobe-vm"   -v /var/blobe:/var/blobe   -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro   -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro"   -v /var/run/docker.sock:/var/run/docker.sock   -v "$STATE_DIR/dashboard:/app:ro"   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}"   -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}"   -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}"   python:3.11-slim     bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py"   >/dev/null
 
 echo "Dashboard: http://$(hostname -I | awk '{print $1}'):${DASHBOARD_PORT}/dashboard"
