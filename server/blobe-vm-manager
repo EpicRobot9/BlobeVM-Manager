@@ -404,6 +404,13 @@ run_container() {
     TITLE_ENV="${name}"
   fi
 
+  local graphics_env=()
+  if [[ ! -e /dev/dri/renderD128 ]]; then
+    # Newer baseimage-kasmvnc revisions pass -drinode by default.
+    # On hosts without /dev/dri this can cause blue/blank sessions.
+    graphics_env+=( -e DISABLE_DRI=1 -e DRINODE=/dev/null )
+  fi
+
   docker run -d \
     --name "$cname" \
     --restart unless-stopped \
@@ -412,6 +419,7 @@ run_container() {
     -e TZ=Etc/UTC \
     -e SUBFOLDER="$subfolder" \
     -e TITLE="$TITLE_ENV" \
+    ${graphics_env[@]:-} \
     --shm-size="2gb" \
     -v "$save_dir":/config \
     ${publish_args[@]:-} \
