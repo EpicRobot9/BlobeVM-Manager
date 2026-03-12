@@ -12,14 +12,14 @@
       if(!frame) return;
       if(live){
         frame.style.display = 'block';
-        if(vm.url && frame.src !== vm.url) frame.src = vm.url;
+        if(init.vmurl && frame.src !== init.vmurl) frame.src = init.vmurl;
       } else {
         frame.style.display = 'none';
       }
     }, [live, vm && vm.url]);
 
     if(live) return null;
-    return React.createElement(window.VMFallback, { vmname:init.vmname, vmurl:vm && vm.url ? vm.url : init.vmurl });
+    return React.createElement(window.VMFallback, { vmname:init.vmname, vmurl:init.vmurl });
   }
 
   try {

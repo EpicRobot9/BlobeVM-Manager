@@ -58,10 +58,10 @@
         if(status && status.running){
           const frame = document.getElementById('vmframe');
           if(frame){
-            frame.src = status.url || vmurl || frame.src;
+            frame.src = vmurl || frame.src;
             frame.style.display = 'block';
           }
-          window.location.replace(status.url || vmurl || window.location.href);
+          setPhase('idle');
           return { ok:true, status };
         }
         await new Promise(r=>setTimeout(r, 1500));

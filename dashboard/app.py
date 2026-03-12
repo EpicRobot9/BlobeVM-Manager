@@ -1818,20 +1818,25 @@ def dashboard_vm_wrapper(name):
         </head>
         <body>
             <div id="root"></div>
-            <iframe id="vmframe" class="vm-iframe" src=__JS_URL__ style="display:none"></iframe>
+            <iframe id="vmframe" class="vm-iframe" src=__JS_URL__ style="display:none" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-popups"></iframe>
             <script>window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__ };</script>
             <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
             <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
             <script src="https://unpkg.com/babel-standalone@6.26.0/babel.min.js"></script>
-            <script type="text/babel" src="/static/js/api/vms.js"></script>
-            <script type="text/babel" src="/static/js/hooks/useVMStatus.js"></script>
-            <script type="text/babel" src="/static/js/components/VMFallback.jsx"></script>
-            <script type="text/babel" src="/static/js/main_vm_wrapper.jsx"></script>
+            <script>window.__VM_WRAPPER_ASSET_VER = Date.now().toString();</script>
+            <script type="text/babel" src="/static/js/api/vms.js?v=20260312b"></script>
+            <script type="text/babel" src="/static/js/hooks/useVMStatus.js?v=20260312b"></script>
+            <script type="text/babel" src="/static/js/components/VMFallback.jsx?v=20260312b"></script>
+            <script type="text/babel" src="/static/js/main_vm_wrapper.jsx?v=20260312b"></script>
         </body>
     </html>
     '''
         page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name)
-        return page
+        resp = Response(page, mimetype='text/html')
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        return resp
 
 
 # Register an alias route under the configured base path (e.g. /vm/<name>/) so merged-mode
