@@ -5,6 +5,8 @@ ENV_FILE="/opt/blobe-vm/.env"
 STATE_DIR="/opt/blobe-vm"
 APP_PATH="/opt/blobe-vm/dashboard/app.py"
 NAME="blobedash"
+IMAGE_NAME="blobedash:local"
+IMAGE_HASH_FILE="/opt/blobe-vm/.blobedash-image.hash"
 
 # Load env file if present
 if [[ -f "$ENV_FILE" ]]; then
@@ -53,6 +55,35 @@ find_free_port() {
   return 1
 }
 
+blobedash_build_hash() {
+  local hash_input=""
+  for p in \
+    "$STATE_DIR/dashboard/app.py" \
+    "$STATE_DIR/dashboard/optimizer.py" \
+    "$STATE_DIR/server/blobedash.Dockerfile"
+  do
+    if [[ -f "$p" ]]; then
+      hash_input+="$(sha256sum "$p")\n"
+    fi
+  done
+  printf "%b" "$hash_input" | sha256sum | awk '{print $1}'
+}
+
+ensure_blobedash_image() {
+  local dockerfile="$STATE_DIR/server/blobedash.Dockerfile"
+  [[ -f "$dockerfile" ]] || { echo "blobedash Dockerfile not found: $dockerfile" >&2; exit 1; }
+  local new_hash old_hash image_id
+  new_hash="$(blobedash_build_hash)"
+  old_hash="$(cat "$IMAGE_HASH_FILE" 2>/dev/null || true)"
+  image_id="$(docker images -q "$IMAGE_NAME" 2>/dev/null | head -n1 || true)"
+  if [[ -n "$image_id" && -n "$old_hash" && "$old_hash" == "$new_hash" ]]; then
+    return 0
+  fi
+  echo "Building $IMAGE_NAME ..."
+  docker build -t "$IMAGE_NAME" -f "$dockerfile" "$STATE_DIR"
+  printf "%s" "$new_hash" > "$IMAGE_HASH_FILE"
+}
+
 # Ensure dashboard app exists
 if [[ ! -f "$APP_PATH" ]]; then
   if [[ -n "${REPO_DIR:-}" && -f "${REPO_DIR}/dashboard/app.py" ]]; then
@@ -64,17 +95,21 @@ if [[ ! -f "$APP_PATH" ]]; then
 fi
 
 
+container_uses_port() {
+  local name="$1"; local port="$2"
+  docker inspect "$name" --format '{{range $k,$v := .HostConfig.PortBindings}}{{range $v}}{{.HostPort}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | grep -qx "$port"
+}
+
 # Determine or assign port
 DASHBOARD_PORT=${DASHBOARD_PORT:-}
-# If no port set or the current one is busy, (re)assign a free port
-if [[ -z "$DASHBOARD_PORT" ]] || port_in_use "$DASHBOARD_PORT"; then
+# If no port set or the current one is busy for something other than the current blobedash container, (re)assign a free port
+if [[ -z "$DASHBOARD_PORT" ]] || { port_in_use "$DASHBOARD_PORT" && ! container_uses_port "$NAME" "$DASHBOARD_PORT"; }; then
   new_port=$(find_free_port "$DIRECT_PORT_START" 1000 || true)
   if [[ -z "$new_port" ]]; then
     echo "Unable to find a free port for dashboard" >&2
     exit 1
   fi
   DASHBOARD_PORT="$new_port"
-  # Persist into .env
   if [[ -f "$ENV_FILE" ]]; then
     if grep -q '^DASHBOARD_PORT=' "$ENV_FILE"; then
       sed -i -E "s|^DASHBOARD_PORT=.*|DASHBOARD_PORT='$DASHBOARD_PORT'|" "$ENV_FILE"
@@ -83,6 +118,8 @@ if [[ -z "$DASHBOARD_PORT" ]] || port_in_use "$DASHBOARD_PORT"; then
     fi
   fi
 fi
+
+ensure_blobedash_image
 
 # Recreate container to ensure correct port mapping
 if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
@@ -132,6 +169,19 @@ if docker network inspect proxy >/dev/null 2>&1; then
   NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.tls.certresolver=myresolver')
 fi
 
-docker run -d --name "$NAME" --restart unless-stopped   -p "${DASHBOARD_PORT}:5000"   ${NET_ARGS[@]}   -v "$STATE_DIR:/opt/blobe-vm"   -v /var/blobe:/var/blobe   -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro   -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro"   -v /var/run/docker.sock:/var/run/docker.sock   -v "$STATE_DIR/dashboard:/app:ro"   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}"   -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}"   -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}"   python:3.11-slim     bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py"   >/dev/null
+docker run -d --name "$NAME" --restart unless-stopped \
+  -p "${DASHBOARD_PORT}:5000" \
+  ${NET_ARGS[@]} \
+  -v "$STATE_DIR:/opt/blobe-vm" \
+  -v /var/blobe:/var/blobe \
+  -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
+  -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$STATE_DIR/dashboard:/app:ro" \
+  -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
+  -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
+  -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
+  "$IMAGE_NAME" \
+  >/dev/null
 
 echo "Dashboard: http://$(hostname -I | awk '{print $1}'):${DASHBOARD_PORT}/dashboard"
