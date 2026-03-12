@@ -136,7 +136,7 @@ export default function VMManager(){
   const [busyAction, setBusyAction] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState({})
-  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, recommendations:[], vmStates:[], cfg:{}, history:{ events:[], vms:{} } })
+  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, capacity:{}, recommendations:[], vmStates:[], cfg:{}, history:{ events:[], vms:{} } })
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
   const didLoadOnceRef = useRef(false)
@@ -369,6 +369,7 @@ export default function VMManager(){
   const protectedCount = useMemo(()=>instances.filter(vm => vm._optimizer?.protected).length, [instances])
   const unstableCount = useMemo(()=>instances.filter(vm => vm._optimizer?.unstable).length, [instances])
   const hostPressure = optimizer.hostPressure || { level:'healthy', reasons:[] }
+  const capacity = optimizer.capacity || {}
   const recentEvents = (optimizer.history && optimizer.history.events ? optimizer.history.events : []).slice(-8).reverse()
 
   return (
@@ -407,6 +408,21 @@ export default function VMManager(){
           </div>
           <div className="optimizer-reason-list">
             {(hostPressure.reasons || []).length ? hostPressure.reasons.map((reason, idx)=><div key={idx}>{reason}</div>) : <div>No host pressure warnings.</div>}
+          </div>
+        </div>
+
+        <div className="glass-card optimizer-card">
+          <div className="optimizer-card-label">Capacity forecast</div>
+          <div className={`optimizer-pressure pressure-${capacity.gamingSuitability === 'poor' ? 'danger' : capacity.gamingSuitability === 'tight' ? 'warn' : 'ok'}`}>{capacity.gamingSuitability || 'good'}</div>
+          <div className="optimizer-pressure-stats">
+            <div><strong>{capacity.estimatedAdditionalGamingSlots ?? 0}</strong><span>Extra gaming slots</span></div>
+            <div><strong>{capacity.estimatedAdditionalInteractiveSlots ?? 0}</strong><span>Extra interactive slots</span></div>
+            <div><strong>{Math.round(capacity.cpuHeadroomPercent ?? 0)}%</strong><span>CPU headroom</span></div>
+          </div>
+          <div className="optimizer-reason-list">
+            <div>Active VMs: {capacity.activeVmCount ?? 0}</div>
+            <div>Interactive/Gaming: {capacity.interactiveVmCount ?? 0} / {capacity.gamingVmCount ?? 0}</div>
+            <div>Free VM memory budget: {capacity.freeForVmsMb ?? 0} MB</div>
           </div>
         </div>
 

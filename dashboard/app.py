@@ -2946,6 +2946,7 @@ def api_optimizer_v2_summary():
         return jsonify({
             'ok': True,
             'hostPressure': stats.get('hostPressure') or {},
+            'capacity': stats.get('capacity') or {},
             'vmStates': stats.get('vmStates') or [],
             'recommendations': stats.get('recommendations') or [],
             'profiles': stats.get('profiles') or {},

@@ -228,6 +228,7 @@ def _derive_host_pressure(stats: dict, cfg: dict):
     mem = stats.get('mem') or {}
     swap = stats.get('swap') or {}
     available = mem.get('available', max(0, int(mem.get('total', 0)) - int(mem.get('used', 0))))
+    total_mem_mb = int((mem.get('total') or 0) / 1024 / 1024) if mem.get('total') else 0
     available_mb = int(available / 1024 / 1024) if available else 0
     cpu_values = [float(c.get('cpu') or 0.0) for c in (stats.get('containers') or []) if str(c.get('name', '')).startswith('blobevm_')]
     vm_cpu_total = sum(cpu_values)
@@ -258,6 +259,7 @@ def _derive_host_pressure(stats: dict, cfg: dict):
         'reasons': reasons,
         'vmCpuTotal': round(vm_cpu_total, 2),
         'availableMemoryMb': available_mb,
+        'totalMemoryMb': total_mem_mb,
         'swapPercent': swap_percent,
     }
 
@@ -731,22 +733,76 @@ def _can_start_vm(cfg: dict, vm_states, host_pressure, profile: str = 'desktop',
     level = host_pressure.get('level') or 'healthy'
     active_count = len([v for v in (vm_states or []) if v.get('activityClass') in ('active', 'warm') and v.get('running')])
     protected_count = len([v for v in (vm_states or []) if _is_vm_protected(v) and v.get('running')])
+    capacity = _estimate_capacity(cfg, {'mem': {'total': int(host_pressure.get('totalMemoryMb', 0)) * 1024 * 1024, 'available': int(host_pressure.get('availableMemoryMb', 0)) * 1024 * 1024}}, vm_states, host_pressure)
     if level == 'critical':
-        return {'ok': False, 'reason': 'Host pressure is critical; new VM starts are temporarily blocked.', 'code': 'host-critical'}
+        return {'ok': False, 'reason': 'Host pressure is critical; new VM starts are temporarily blocked.', 'code': 'host-critical', 'capacity': capacity}
+    if profile == 'gaming' and capacity.get('estimatedAdditionalGamingSlots', 0) <= 0:
+        return {'ok': False, 'reason': 'No safe additional gaming capacity is available on this host right now.', 'code': 'gaming-capacity', 'capacity': capacity}
+    if profile in ('interactive', 'gaming') and capacity.get('estimatedAdditionalInteractiveSlots', 0) <= 0:
+        return {'ok': False, 'reason': f'There is no safe interactive capacity left for another {profile} VM right now.', 'code': 'interactive-capacity', 'capacity': capacity}
     if level == 'pressured' and profile in ('gaming', 'interactive'):
-        return {'ok': False, 'reason': f'Host pressure is high; refusing to start a {profile} VM right now.', 'code': 'profile-blocked'}
+        return {'ok': False, 'reason': f'Host pressure is high; refusing to start a {profile} VM right now.', 'code': 'profile-blocked', 'capacity': capacity}
     if level == 'pressured' and active_count >= 2 and protected_count >= 1:
-        return {'ok': False, 'reason': 'There are already active protected VMs; starting another VM may degrade responsiveness.', 'code': 'capacity-guard'}
-    return {'ok': True, 'reason': 'capacity available'}
+        return {'ok': False, 'reason': 'There are already active protected VMs; starting another VM may degrade responsiveness.', 'code': 'capacity-guard', 'capacity': capacity}
+    return {'ok': True, 'reason': 'capacity available', 'capacity': capacity}
+
+
+def _estimate_capacity(cfg: dict, stats: dict, vm_states, host_pressure: dict):
+    available_mb = int(host_pressure.get('availableMemoryMb') or 0)
+    total_mb = int(host_pressure.get('totalMemoryMb') or 0)
+    reserve_mb = int(cfg.get('minAvailableMemoryMb', 2048) or 2048)
+    free_for_vms_mb = max(0, available_mb - reserve_mb)
+    active = [v for v in (vm_states or []) if v.get('running') and v.get('activityClass') in ('active', 'warm')]
+    gaming = [v for v in active if v.get('profile') == 'gaming']
+    interactive = [v for v in active if v.get('profile') in ('interactive', 'gaming')]
+    soft_limit = float(cfg.get('hostCpuSoftLimit', 75) or 75)
+    cpu_headroom = max(0.0, soft_limit - float(host_pressure.get('vmCpuTotal') or 0.0))
+    est_game_slots_by_mem = max(0, int(free_for_vms_mb / 3072)) if free_for_vms_mb else 0
+    est_game_slots_by_cpu = max(0, int(cpu_headroom / 30.0)) if cpu_headroom else 0
+    est_interactive_slots_by_mem = max(0, int(free_for_vms_mb / 2048)) if free_for_vms_mb else 0
+    est_interactive_slots_by_cpu = max(0, int(cpu_headroom / 20.0)) if cpu_headroom else 0
+    projected_game_capacity = min(est_game_slots_by_mem, est_game_slots_by_cpu)
+    projected_interactive_capacity = min(est_interactive_slots_by_mem, est_interactive_slots_by_cpu)
+    suitability = 'good'
+    if host_pressure.get('level') == 'critical' or projected_game_capacity <= 0:
+        suitability = 'poor'
+    elif host_pressure.get('level') == 'pressured' or projected_game_capacity == 1:
+        suitability = 'tight'
+    return {
+        'availableMemoryMb': available_mb,
+        'reserveMemoryMb': reserve_mb,
+        'freeForVmsMb': free_for_vms_mb,
+        'cpuHeadroomPercent': round(cpu_headroom, 2),
+        'activeVmCount': len(active),
+        'interactiveVmCount': len(interactive),
+        'gamingVmCount': len(gaming),
+        'estimatedAdditionalGamingSlots': projected_game_capacity,
+        'estimatedAdditionalInteractiveSlots': projected_interactive_capacity,
+        'gamingSuitability': suitability,
+        'totalMemoryMb': total_mb,
+    }
 
 
 def _build_recommendations(cfg: dict, stats: dict, vm_states, host_pressure):
     recs = []
+    capacity = _estimate_capacity(cfg, stats, vm_states, host_pressure)
     if host_pressure.get('level') in ('pressured', 'critical'):
         recs.append({
             'level': 'warn',
             'title': 'Host pressure is elevated',
             'detail': '; '.join(host_pressure.get('reasons') or ['pressure increasing'])
+        })
+    if capacity.get('gamingSuitability') == 'poor':
+        recs.append({
+            'level': 'warn',
+            'title': 'Host is currently a poor fit for new gaming sessions',
+            'detail': f"Estimated additional gaming slots: {capacity.get('estimatedAdditionalGamingSlots', 0)}; CPU headroom {capacity.get('cpuHeadroomPercent', 0)}%; free VM memory budget {capacity.get('freeForVmsMb', 0)} MB"
+        })
+    elif capacity.get('gamingSuitability') == 'tight':
+        recs.append({
+            'level': 'info',
+            'title': 'Gaming capacity is tight',
+            'detail': f"Estimated additional gaming slots: {capacity.get('estimatedAdditionalGamingSlots', 0)}; active interactive VMs: {capacity.get('interactiveVmCount', 0)}"
         })
     idle_background = [v for v in vm_states if v.get('activityClass') == 'idle' and v.get('profile') in ('background', 'disposable') and v.get('running')]
     if idle_background and host_pressure.get('level') in ('pressured', 'critical'):
@@ -778,7 +834,7 @@ def _build_recommendations(cfg: dict, stats: dict, vm_states, host_pressure):
         })
     if not recs:
         recs.append({'level': 'ok', 'title': 'No optimizer recommendations right now', 'detail': 'Host pressure is stable and VM activity looks calm.'})
-    return recs[:6]
+    return recs[:8]
 
 
 def run_once():
@@ -824,6 +880,7 @@ def run_once():
             'raw': post_stats,
             'hostPressure': post_host_pressure,
             'vmStates': post_vm_states,
+            'capacity': _estimate_capacity(cfg, post_stats, post_vm_states, post_host_pressure),
             'recommendations': _build_recommendations(cfg, post_stats, post_vm_states, post_host_pressure),
             'history': _history_state(),
         }
@@ -875,6 +932,7 @@ def status():
         'raw': raw_stats,
         'hostPressure': host_pressure,
         'vmStates': vm_states,
+        'capacity': _estimate_capacity(cfg, raw_stats, vm_states, host_pressure),
         'recommendations': _build_recommendations(cfg, raw_stats, vm_states, host_pressure),
         'profiles': load_profiles(),
         'history': _history_state(),
