@@ -80,6 +80,15 @@ function recoveryTone(state){
   return 'ok'
 }
 
+function recommendedActionTone(action){
+  const s = String(action || '').toLowerCase()
+  if(s.includes('escalate')) return 'danger'
+  if(s.includes('stop')) return 'warn'
+  if(s.includes('recover') || s.includes('wait')) return 'info'
+  if(s.includes('preserve')) return 'protected'
+  return 'ok'
+}
+
 function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshing }){
   const tone = toneFor(vm.status)
   const meta = vm._optimizer || {}
@@ -124,6 +133,13 @@ function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshi
         <div><span>Recreates</span><strong>{meta.recreateCount ?? 0}</strong></div>
       </div>
 
+      {meta.recommendedAction && (
+        <div className={`vm-recommendation tone-${recommendedActionTone(meta.recommendedAction.action)}`}>
+          <strong>{meta.recommendedAction.label || 'Recommended action'}</strong>
+          <span>{meta.recommendedAction.detail || 'No detail available.'}</span>
+        </div>
+      )}
+
       <div className="vm-card-actions">
         <Button disabled={busyAction} onClick={()=>onAction('start', vm.name)}>Start</Button>
         <Button disabled={busyAction} onClick={()=>onAction('stop', vm.name)}>Stop</Button>
@@ -140,6 +156,7 @@ export default function VMManager(){
   const [initialLoading, setInitialLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [selected, setSelected] = useState(null)
+  const [selectedVmMeta, setSelectedVmMeta] = useState(null)
   const [logs, setLogs] = useState('')
   const [logLoading, setLogLoading] = useState(false)
   const [announcement, setAnnouncement] = useState('')
@@ -363,6 +380,8 @@ export default function VMManager(){
 
   async function openDetails(name){
     setSelected(name)
+    const vm = instances.find(v => v.name === name) || null
+    setSelectedVmMeta(vm)
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name)
   }
@@ -602,7 +621,7 @@ export default function VMManager(){
         </div>
       </Modal>
 
-      <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>setSelected(null)} width={1180}>
+      <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>{ setSelected(null); setSelectedVmMeta(null) }} width={1180}>
         <div style={{display:'flex',gap:12, flexWrap:'wrap'}}>
           <div style={{flex:'1 1 620px'}}>
             <iframe title={`VM ${selected}`} src={`/dashboard/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:360,border:'1px solid rgba(255,255,255,0.04)', background:'#020617'}} />
@@ -611,6 +630,18 @@ export default function VMManager(){
             </div>
           </div>
           <div style={{width:420,maxWidth:'100%',display:'flex',flexDirection:'column',gap:8}}>
+            <div className="vm-detail-card">
+              <div className="vm-detail-heading">Optimizer summary</div>
+              <div className="vm-detail-list">
+                <div><span>Recovery</span><strong>{selectedVmMeta?._optimizer?.recoveryState || 'healthy'}</strong></div>
+                <div><span>Profile</span><strong>{selectedVmMeta?._optimizer?.profile || 'desktop'}</strong></div>
+                <div><span>Activity</span><strong>{selectedVmMeta?._optimizer?.activityClass || 'unknown'}</strong></div>
+                <div><span>Protected</span><strong>{selectedVmMeta?._optimizer?.protected ? 'Yes' : 'No'}</strong></div>
+                <div><span>Unstable</span><strong>{selectedVmMeta?._optimizer?.unstable ? 'Yes' : 'No'}</strong></div>
+                <div><span>Recommended</span><strong>{selectedVmMeta?._optimizer?.recommendedAction?.label || 'Observe'}</strong></div>
+              </div>
+              {selectedVmMeta?._optimizer?.recommendedAction?.detail && <div className="vm-detail-note">{selectedVmMeta._optimizer.recommendedAction.detail}</div>}
+            </div>
             <div style={{fontSize:13,color:'var(--muted)'}}>Console / Logs</div>
             <div style={{background:'#02040a',color:'#dff',padding:12,borderRadius:12,height:460,overflow:'auto',fontFamily:'monospace',fontSize:12,border:'1px solid rgba(255,255,255,0.04)'}}>
               {logLoading ? <div>Loading logs…</div> : <pre style={{whiteSpace:'pre-wrap',margin:0}}>{logs}</pre>}

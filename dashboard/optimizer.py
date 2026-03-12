@@ -874,6 +874,29 @@ def _estimate_capacity(cfg: dict, stats: dict, vm_states, host_pressure: dict):
     }
 
 
+def _recommend_vm_action(vm_state: dict, host_pressure: dict, capacity: dict):
+    if not isinstance(vm_state, dict):
+        return {'action': 'observe', 'label': 'Observe', 'detail': 'No VM state available.'}
+    recovery = str(vm_state.get('recoveryState') or 'healthy').lower()
+    profile = str(vm_state.get('profile') or 'desktop')
+    protected = bool(vm_state.get('protected'))
+    unstable = bool(vm_state.get('unstable'))
+    activity = str(vm_state.get('activityClass') or 'idle')
+    if recovery == 'restart-loop' or unstable:
+        return {'action': 'escalate', 'label': 'Escalate or recreate', 'detail': 'Repeated disruptive interventions detected; this VM likely needs deeper repair.'}
+    if recovery.startswith('protected-'):
+        return {'action': 'cautious-recover', 'label': 'Cautious recovery', 'detail': 'The VM looks important/active, so avoid aggressive rebuilds unless manually approved.'}
+    if recovery in ('recovering', 'restarting'):
+        return {'action': 'wait', 'label': 'Wait for recovery', 'detail': 'Recovery is already in flight; watch trend and logs before acting again.'}
+    if recovery == 'degraded':
+        return {'action': 'recover', 'label': 'Try recovery', 'detail': 'The VM looks degraded but not yet in a loop; a standard recovery attempt is reasonable.'}
+    if host_pressure.get('level') in ('pressured', 'critical') and activity == 'idle' and profile in ('background', 'disposable', 'light', 'desktop'):
+        return {'action': 'stop', 'label': 'Stop to relieve pressure', 'detail': 'This idle VM is a reasonable pressure-relief candidate.'}
+    if profile == 'gaming' and capacity.get('gamingSuitability') in ('tight', 'poor'):
+        return {'action': 'preserve', 'label': 'Preserve and reduce neighbors', 'detail': 'Gaming VM should stay up; reduce density around it instead.'}
+    return {'action': 'observe', 'label': 'Observe', 'detail': 'No immediate optimizer action recommended.'}
+
+
 def _build_recommendations(cfg: dict, stats: dict, vm_states, host_pressure):
     recs = []
     capacity = _estimate_capacity(cfg, stats, vm_states, host_pressure)
@@ -982,6 +1005,7 @@ def run_once():
         post_host_pressure = _derive_host_pressure(post_stats, cfg)
         post_vm_states = _derive_vm_states(cfg, post_stats)
         post_capacity = _estimate_capacity(cfg, post_stats, post_vm_states, post_host_pressure)
+        post_vm_states = [dict(v, recommendedAction=_recommend_vm_action(v, post_host_pressure, post_capacity)) for v in post_vm_states]
         _record_trend_point(post_host_pressure, post_capacity, post_vm_states)
         payload_stats = {
             'raw': post_stats,
@@ -1037,11 +1061,13 @@ def status():
     raw_stats = gather_stats()
     host_pressure = _derive_host_pressure(raw_stats, cfg)
     vm_states = _derive_vm_states(cfg, raw_stats)
+    capacity = _estimate_capacity(cfg, raw_stats, vm_states, host_pressure)
+    vm_states = [dict(v, recommendedAction=_recommend_vm_action(v, host_pressure, capacity)) for v in vm_states]
     stats = {
         'raw': raw_stats,
         'hostPressure': host_pressure,
         'vmStates': vm_states,
-        'capacity': _estimate_capacity(cfg, raw_stats, vm_states, host_pressure),
+        'capacity': capacity,
         'reliefCandidates': _relief_candidates(vm_states),
         'recommendations': _build_recommendations(cfg, raw_stats, vm_states, host_pressure),
         'profiles': load_profiles(),
