@@ -46,6 +46,8 @@ DEFAULT_CFG = {
     'activityWindowSeconds': 300,
     'idleGraceSeconds': 1800,
     'blockStartsOnPressure': True,
+    'allowForceStartUnderPressure': True,
+    'protectedRestartCooldownSeconds': 900,
 }
 
 
@@ -336,6 +338,7 @@ def perform_scheduled_restart(cfg: dict):
             return
         if now - last < interval:
             return
+        current_states = _vm_state_map(_derive_vm_states(cfg, gather_stats()))
         names = _docker_ps_names()
         restarted = 0
         cooldown = int(cfg.get('containerRestartCooldownMinutes', 10)) * 60
@@ -343,6 +346,11 @@ def perform_scheduled_restart(cfg: dict):
         os.makedirs(RESTART_META_DIR, exist_ok=True)
         for name in names:
             if not name.startswith('blobevm_'):
+                continue
+            vm_name = name[len('blobevm_'):]
+            vm_state = current_states.get(vm_name)
+            if _is_vm_protected(vm_state):
+                log(f'skip scheduled restart {name} (protected/active VM)')
                 continue
             safe = re.sub(r'[^A-Za-z0-9_.-]', '_', name)
             p = os.path.join(RESTART_META_DIR, safe + '.last')
@@ -376,8 +384,10 @@ def perform_scheduled_restart(cfg: dict):
         log(f'performScheduledRestart error {e}')
 
 
-def _run_memory_guard(cfg):
+def _run_memory_guard(cfg, vm_state_map=None, host_pressure=None):
     # analogous to MemoryGuard.js
+    vm_state_map = vm_state_map or {}
+    host_pressure = host_pressure or {}
     try:
         out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.MemPerc}} {{.MemUsage}}'], text=True)
         for l in out.splitlines():
@@ -387,6 +397,8 @@ def _run_memory_guard(cfg):
             name = parts[0]
             if not name.startswith('blobevm_'):
                 continue
+            vm_name = name[len('blobevm_'):]
+            vm_state = vm_state_map.get(vm_name)
             percRaw = parts[1] if len(parts) > 1 else '0%'
             try:
                 perc = float(percRaw.replace('%', ''))
@@ -394,6 +406,9 @@ def _run_memory_guard(cfg):
                 perc = 0.0
             threshold = cfg.get('memoryThreshold', 60)
             if perc >= threshold:
+                if _is_vm_protected(vm_state):
+                    log(f'skip memory restart for {name} at {perc}% (protected active VM)')
+                    continue
                 cooldown = int(cfg.get('guardCooldownSeconds', 300))
                 if not _action_allowed(name, 'memory-restart', cooldown):
                     continue
@@ -408,7 +423,9 @@ def _run_memory_guard(cfg):
     return None
 
 
-def _run_cpu_guard(cfg):
+def _run_cpu_guard(cfg, vm_state_map=None, host_pressure=None):
+    vm_state_map = vm_state_map or {}
+    host_pressure = host_pressure or {}
     try:
         out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.CPUPerc}}'], text=True)
         for l in out.splitlines():
@@ -418,6 +435,8 @@ def _run_cpu_guard(cfg):
             name = parts[0]
             if not name.startswith('blobevm_'):
                 continue
+            vm_name = name[len('blobevm_'):]
+            vm_state = vm_state_map.get(vm_name)
             percRaw = parts[1] if len(parts) > 1 else '0%'
             try:
                 perc = float(percRaw.replace('%', ''))
@@ -425,7 +444,12 @@ def _run_cpu_guard(cfg):
                 perc = 0.0
             threshold = cfg.get('cpuThreshold', 70)
             if perc >= threshold:
-                # best-effort second check omitted
+                if _is_vm_protected(vm_state):
+                    log(f'skip cpu restart for {name} at {perc}% (protected active VM)')
+                    continue
+                if host_pressure.get('level') in ('pressured', 'critical'):
+                    log(f'skip cpu restart for {name} at {perc}% while host pressure={host_pressure.get("level")} (prefer relief actions)')
+                    continue
                 cooldown = int(cfg.get('guardCooldownSeconds', 300))
                 if not _action_allowed(name, 'cpu-restart', cooldown):
                     continue
@@ -440,7 +464,8 @@ def _run_cpu_guard(cfg):
     return None
 
 
-def _run_swap_guard(cfg):
+def _run_swap_guard(cfg, vm_state_map=None, host_pressure=None):
+    vm_state_map = vm_state_map or {}
     try:
         out = subprocess.check_output(['free', '-b'], text=True)
         lines = out.split('\n')
@@ -452,7 +477,11 @@ def _run_swap_guard(cfg):
             perc = int(round(used / total * 100)) if total else 0
             threshold = cfg.get('swapThreshold', 10)
             if perc >= threshold:
-                # restart heaviest VM by memory
+                relief = _stop_idle_pressure_vm(cfg, list(vm_state_map.values()), {'level': 'critical' if perc >= max(threshold, int(cfg.get('maxSwapPercent', 10))) else 'pressured'})
+                if relief:
+                    relief['reason'] = 'swap-pressure-relief'
+                    relief['perc'] = perc
+                    return relief
                 stats = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.MemUsage}}'], text=True)
                 heaviest = None; maxBytes = 0
                 for l in stats.splitlines():
@@ -460,6 +489,9 @@ def _run_swap_guard(cfg):
                     if not p: continue
                     name = p[0]
                     if not name.startswith('blobevm_'): continue
+                    vm_name = name[len('blobevm_'):]
+                    if _is_vm_protected(vm_state_map.get(vm_name)):
+                        continue
                     usage = p[1] if len(p) > 1 else '0'
                     m = re.search(r'([0-9.]+)([KMG]i?)B', usage)
                     bytes_ = 0
@@ -486,7 +518,8 @@ def _run_swap_guard(cfg):
     return None
 
 
-def _run_health_guard(cfg):
+def _run_health_guard(cfg, vm_state_map=None, host_pressure=None):
+    vm_state_map = vm_state_map or {}
     try:
         # use blobe-vm-manager list output
         out = subprocess.check_output(['blobe-vm-manager', 'list'], text=True)
@@ -498,6 +531,7 @@ def _run_health_guard(cfg):
                 url = (parts[2] if len(parts) > 2 else '').strip()
                 if not url:
                     continue
+                protected = _is_vm_protected(vm_state_map.get(name))
                 try:
                     r = subprocess.check_output(['curl', '-Is', '--max-time', '6', url], text=True)
                     if not re.search(r'HTTP\/(1|2) [23]', r):
@@ -508,13 +542,17 @@ def _run_health_guard(cfg):
                             log(f'Health warn for {name}'); open(f1, 'w').write(str(int(time.time())))
                             return {'action': 'warn', 'name': name}
                         if not os.path.exists(f2):
+                            if protected:
+                                log(f'skip health restart for {name} (protected active VM); emitting degraded warning only')
+                                return {'action': 'warn', 'name': name, 'reason': 'health-protected'}
                             cooldown = int(cfg.get('guardCooldownSeconds', 300))
                             if not _action_allowed(name, 'health-restart', cooldown):
                                 return {'action': 'cooldown', 'name': name, 'reason': 'health-restart'}
                             log(f'Health restart container {name}'); open(f2, 'w').write(str(int(time.time())))
                             subprocess.check_call(['docker', 'restart', f'blobevm_{name}'])
                             return {'action': 'restart_container', 'name': name}
-                        # recreate
+                        if protected:
+                            return {'action': 'warn', 'name': name, 'reason': 'health-protected-recreate-skipped'}
                         cooldown = int(cfg.get('guardCooldownSeconds', 300))
                         if not _action_allowed(name, 'health-recreate', cooldown):
                             return {'action': 'cooldown', 'name': name, 'reason': 'health-recreate'}
@@ -530,6 +568,8 @@ def _run_health_guard(cfg):
                     if not os.path.exists(f1):
                         log(f'Health warn (curl fail) for {name}'); open(f1, 'w').write(str(int(time.time())))
                         return {'action': 'warn', 'name': name}
+                    if protected:
+                        return {'action': 'warn', 'name': name, 'reason': 'health-curlfail-protected'}
                     cooldown = int(cfg.get('guardCooldownSeconds', 300))
                     if not _action_allowed(name, 'health-curlfail-restart', cooldown):
                         return {'action': 'cooldown', 'name': name, 'reason': 'health-curlfail-restart'}
@@ -590,6 +630,55 @@ def _derive_vm_states(cfg: dict, stats: dict):
     return states
 
 
+def _vm_state_map(vm_states):
+    return {v.get('name'): v for v in (vm_states or []) if v.get('name')}
+
+
+def _is_vm_protected(vm_state):
+    if not vm_state:
+        return False
+    return bool(vm_state.get('protected')) or vm_state.get('profile') in ('interactive', 'gaming')
+
+
+def _stop_idle_pressure_vm(cfg: dict, vm_states, host_pressure):
+    if host_pressure.get('level') not in ('pressured', 'critical'):
+        return None
+    candidates = [
+        v for v in (vm_states or [])
+        if v.get('running') and v.get('activityClass') == 'idle' and v.get('profile') in ('background', 'disposable', 'light')
+    ]
+    candidates.sort(key=lambda v: (0 if v.get('profile') in ('background', 'disposable') else 1, -float(v.get('memPercent') or 0), -float(v.get('cpuPercent') or 0)))
+    for vm in candidates:
+        name = vm.get('name')
+        cooldown = int(cfg.get('guardCooldownSeconds', 300))
+        if not _action_allowed(name, 'pressure-stop', cooldown):
+            continue
+        try:
+            subprocess.check_call(['docker', 'stop', f'blobevm_{name}'])
+            log(f'stopped idle VM {name} due to host pressure {host_pressure.get("level")}')
+            return {'action': 'stop', 'reason': 'pressure-relief', 'container': f'blobevm_{name}', 'name': name, 'pressureLevel': host_pressure.get('level')}
+        except Exception as e:
+            log(f'failed stopping idle VM {name} for pressure relief: {e}')
+    return None
+
+
+def _can_start_vm(cfg: dict, vm_states, host_pressure, profile: str = 'desktop', force: bool = False):
+    if force and cfg.get('allowForceStartUnderPressure', True):
+        return {'ok': True, 'reason': 'force override allowed'}
+    if not cfg.get('blockStartsOnPressure', True):
+        return {'ok': True, 'reason': 'start blocking disabled'}
+    level = host_pressure.get('level') or 'healthy'
+    active_count = len([v for v in (vm_states or []) if v.get('activityClass') in ('active', 'warm') and v.get('running')])
+    protected_count = len([v for v in (vm_states or []) if _is_vm_protected(v) and v.get('running')])
+    if level == 'critical':
+        return {'ok': False, 'reason': 'Host pressure is critical; new VM starts are temporarily blocked.', 'code': 'host-critical'}
+    if level == 'pressured' and profile in ('gaming', 'interactive'):
+        return {'ok': False, 'reason': f'Host pressure is high; refusing to start a {profile} VM right now.', 'code': 'profile-blocked'}
+    if level == 'pressured' and active_count >= 2 and protected_count >= 1:
+        return {'ok': False, 'reason': 'There are already active protected VMs; starting another VM may degrade responsiveness.', 'code': 'capacity-guard'}
+    return {'ok': True, 'reason': 'capacity available'}
+
+
 def _build_recommendations(cfg: dict, stats: dict, vm_states, host_pressure):
     recs = []
     if host_pressure.get('level') in ('pressured', 'critical'):
@@ -632,6 +721,11 @@ def run_once():
         pre_stats = gather_stats()
         host_pressure = _derive_host_pressure(pre_stats, cfg)
         vm_states = _derive_vm_states(cfg, pre_stats)
+        vm_state_map = _vm_state_map(vm_states)
+        if host_pressure.get('level') in ('pressured', 'critical') and len(events) < max_actions:
+            relief = _stop_idle_pressure_vm(cfg, vm_states, host_pressure)
+            if relief:
+                events.append(relief)
         guards = []
         if cfg.get('guards', {}).get('memory'):
             guards.append(_run_memory_guard)
@@ -645,7 +739,7 @@ def run_once():
             if len(events) >= max_actions:
                 log(f'maxActionsPerRun reached ({max_actions}), stopping guard execution early')
                 break
-            r = guard(cfg)
+            r = guard(cfg, vm_state_map=vm_state_map, host_pressure=host_pressure)
             if r:
                 events.append(r)
         if cfg.get('strictMemoryLimit'):

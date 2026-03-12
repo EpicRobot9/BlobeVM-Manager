@@ -211,6 +211,11 @@ export default function VMManager(){
     try{
       if(cmd === 'start'){
         await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'start-click' }) }).catch(()=>null)
+        const admRes = await apiFetch(`/optimizer/admission/${encodeURIComponent(name)}`).catch(()=>null)
+        const admBody = admRes && typeof admRes.json === 'function' ? await admRes.json().catch(()=>null) : null
+        if(admBody && admBody.admission && admBody.admission.ok === false){
+          throw new Error(admBody.admission.reason || 'Start blocked by optimizer admission control')
+        }
       }
       const res = await apiFetch(`/${cmd}/${encodeURIComponent(name)}`, { method:'POST' })
       const body = await res.json().catch(()=>({ ok:res.ok }))

@@ -2176,6 +2176,7 @@ def api_create():
 @app.post('/dashboard/api/start/<name>')
 @auth_required
 def api_start(name):
+    force = request.values.get('force') in ('1', 'true', 'yes', 'on')
     # Safe-start: reject if already running
     try:
         cname = f'blobevm_{name}'
@@ -2183,12 +2184,25 @@ def api_start(name):
         if r.returncode == 0 and r.stdout.strip():
             return jsonify({'ok': False, 'error': 'VM already running'})
     except Exception:
-        # If we can't determine, proceed to attempt start
+        pass
+    try:
+        opt_status = dash_optimizer.status()
+        stats = opt_status.get('stats') or {}
+        profiles = (stats.get('profiles') or {}) if isinstance(stats, dict) else {}
+        profile = profiles.get(name, 'desktop')
+        start_ok = dash_optimizer._can_start_vm(opt_status.get('cfg') or {}, stats.get('vmStates') or [], stats.get('hostPressure') or {}, profile=profile, force=force)
+        if not start_ok.get('ok'):
+            return jsonify({'ok': False, 'error': start_ok.get('reason') or 'Start blocked by optimizer', 'code': start_ok.get('code'), 'optimizer': start_ok}), 409
+    except Exception:
         pass
     try:
         result = subprocess.run([MANAGER, 'start', name], capture_output=True, text=True)
         if result.returncode != 0:
             return jsonify({'ok': False, 'error': result.stderr.strip() or 'Failed to start VM'}), 500
+        try:
+            dash_optimizer.note_vm_activity(name, 'api-start')
+        except Exception:
+            pass
         return jsonify({'ok': True})
     except FileNotFoundError:
         return jsonify({'ok': False, 'error': 'blobe-vm-manager not found'}), 500
@@ -2964,6 +2978,21 @@ def api_optimizer_activity(name):
         source = (data.get('source') if isinstance(data, dict) else None) or 'dashboard-api'
         dash_optimizer.note_vm_activity(name, source)
         return jsonify({'ok': True, 'name': name, 'source': source})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/optimizer/admission/<name>')
+@auth_required
+def api_optimizer_admission(name):
+    try:
+        force = request.args.get('force') in ('1', 'true', 'yes', 'on')
+        s = dash_optimizer.status()
+        stats = s.get('stats') or {}
+        profiles = stats.get('profiles') or {}
+        profile = profiles.get(name, 'desktop')
+        result = dash_optimizer._can_start_vm(s.get('cfg') or {}, stats.get('vmStates') or [], stats.get('hostPressure') or {}, profile=profile, force=force)
+        return jsonify({'ok': True, 'name': name, 'profile': profile, 'admission': result})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
