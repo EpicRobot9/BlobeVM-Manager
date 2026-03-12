@@ -1303,6 +1303,19 @@ def _vm_status_payload(name: str):
         restarting or
         payload['status'] == 'dead'
     )
+    try:
+        opt = dash_optimizer.status()
+        vm_states = ((opt.get('stats') or {}).get('vmStates') or []) if isinstance(opt, dict) else []
+        vm_meta = next((v for v in vm_states if v.get('name') == name), None)
+        if vm_meta:
+            payload['optimizer'] = vm_meta
+            payload['recoveryState'] = vm_meta.get('recoveryState')
+            payload['protectedVm'] = bool(vm_meta.get('protected'))
+            payload['activityClass'] = vm_meta.get('activityClass')
+            payload['profile'] = vm_meta.get('profile')
+            payload['unstable'] = bool(vm_meta.get('unstable'))
+    except Exception:
+        pass
     return payload
 
 

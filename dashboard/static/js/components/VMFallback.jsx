@@ -10,18 +10,25 @@
   }
 
   function humanState(vm){
+    const recovery = String((vm && vm.recoveryState) || '').toLowerCase();
     if(!vm) return 'Checking VM status…';
+    if(recovery.startsWith('protected-degraded')) return 'Protected VM is degraded';
+    if(recovery.startsWith('protected-restart') || recovery.startsWith('protected-recover')) return 'Protected VM is recovering carefully';
+    if(recovery === 'restart-loop') return 'This VM is stuck in a restart loop';
+    if(recovery === 'recovering') return 'This VM is being rebuilt or recovered';
+    if(recovery === 'restarting' || vm.state === 'restarting') return 'This VM is restarting';
+    if(recovery === 'degraded') return 'This VM is degraded';
     if(vm.running && vm.healthy) return 'Online and healthy';
     if(vm.running) return 'VM is online';
     if(vm.crashed) return 'This VM crashed';
     if(vm.state === 'not-found') return 'This VM is not provisioned correctly';
-    if(vm.state === 'restarting') return 'This VM is recovering';
     return 'This VM is currently down';
   }
 
   function VMFallback(props){
     const vmname = props.vmname;
     const vmurl = props.vmurl;
+    const iframeReady = !!props.iframeReady;
     const vm = window.useVMStatus(vmname, { interval: 1600 });
     const [phase, setPhase] = useState('idle'); // idle | starting | recovering | error | sent
     const [errorMsg, setErrorMsg] = useState('');
@@ -32,15 +39,25 @@
 
     useEffect(()=>{
       const frame = document.getElementById('vmframe');
-      if(frame) frame.style.display = vm && vm.running ? 'block' : 'none';
+      if(frame) frame.style.display = (vm && vm.running && iframeReady) ? 'block' : 'none';
       if(vm && vm.running && vmurl && frame && frame.src !== vmurl){
         frame.src = vmurl;
       }
-      if(vm && vm.running){
+      if(vm && vm.running && iframeReady){
         if(phase !== 'sent') setPhase('idle');
         setErrorMsg('');
       }
-    }, [vm && vm.running, vmurl]);
+    }, [vm && vm.running, vmurl, iframeReady]);
+
+    async function probeVmUrl(){
+      if(!vmurl) return false;
+      try{
+        const res = await fetch(vmurl, { method:'GET', cache:'no-store', credentials:'same-origin' });
+        return !!(res && res.ok);
+      }catch(e){
+        return false;
+      }
+    }
 
     useEffect(()=>{
       if(vm && vm.crashed){
@@ -53,16 +70,24 @@
 
     async function waitForUp(timeoutMs){
       const started = Date.now();
+      let runningSeenAt = null;
       while(Date.now() - started < timeoutMs){
         const status = await window.api.getVMStatus(vmname);
         if(status && status.running){
-          const frame = document.getElementById('vmframe');
-          if(frame){
-            frame.src = vmurl || frame.src;
-            frame.style.display = 'block';
+          if(!runningSeenAt) runningSeenAt = Date.now();
+          const ready = await probeVmUrl();
+          const runningForMs = Date.now() - runningSeenAt;
+          if(ready && runningForMs >= 3000){
+            const frame = document.getElementById('vmframe');
+            if(frame){
+              frame.src = vmurl || frame.src;
+              frame.style.display = 'block';
+            }
+            setPhase('idle');
+            return { ok:true, status };
           }
-          setPhase('idle');
-          return { ok:true, status };
+        } else {
+          runningSeenAt = null;
         }
         await new Promise(r=>setTimeout(r, 1500));
       }
@@ -141,9 +166,14 @@
     }
 
     const title = humanState(vm);
-    const subtitle = vm && vm.crashed
-      ? 'I tried to bring it back automatically. If that failed, you can escalate it to OpenClaw below.'
-      : 'You can power it on here and I’ll switch you over once it is actually alive.';
+    const recovery = String((vm && vm.recoveryState) || '').toLowerCase();
+    const subtitle = recovery === 'restart-loop'
+      ? 'This VM has been bounced repeatedly. Recreate or escalate it instead of spamming normal restart forever.'
+      : (recovery.startsWith('protected-')
+        ? 'This VM is being preserved because it looks active or important. Recovery is intentionally more cautious.'
+        : (vm && vm.crashed
+          ? 'I tried to bring it back automatically. If that failed, you can escalate it to OpenClaw below.'
+          : 'You can power it on here and I’ll switch you over once it is actually alive.'));
 
     return (
       React.createElement('div', { className:`fallback tone-${tone}`, role:'status' },
@@ -158,25 +188,36 @@
               React.createElement('p', { className:'hero-subtitle' }, subtitle),
               React.createElement('div', { className:'meta-row' },
                 React.createElement('div', { className:'meta-chip' }, `State: ${(vm && (vm.state || vm.status)) || 'checking'}`),
+                React.createElement('div', { className:'meta-chip' }, `Recovery: ${(vm && vm.recoveryState) || 'healthy'}`),
+                React.createElement('div', { className:'meta-chip' }, `Profile: ${(vm && vm.profile) || 'desktop'}`),
                 React.createElement('div', { className:'meta-chip' }, `Exit: ${vm && vm.exitCode != null ? vm.exitCode : '—'}`),
                 React.createElement('div', { className:'meta-chip' }, `Health: ${vm && vm.healthy ? 'healthy' : 'unknown'}`)
               ),
-              (phase === 'starting' || phase === 'recovering') && React.createElement('div', { className:'loading-wrap' },
+              ((phase === 'starting' || phase === 'recovering') || (vm && vm.running && !iframeReady)) && React.createElement('div', { className:'loading-wrap' },
                 React.createElement('div', { className:'spinner', 'aria-hidden': true }),
-                React.createElement('div', { className:'loading-title' }, phase === 'starting' ? 'Powering on VM…' : 'Recovering crashed VM…'),
+                React.createElement('div', { className:'loading-title' }, phase === 'recovering' ? 'Recovering crashed VM…' : ((vm && vm.running && !iframeReady) ? 'VM is starting up…' : 'Powering on VM…')),
                 React.createElement('div', { className:'loading-subtitle' }, 'Waiting for a real healthy response before switching you over.')
               ),
-              phase !== 'starting' && phase !== 'recovering' && React.createElement('div', { className:'actions' },
-                React.createElement('button', { className:'btn btn-primary', onClick: attemptStart }, 'Turn on VM'),
-                React.createElement('button', { className:'btn btn-secondary', onClick: ()=>attemptRecover('Manual recovery requested from dashboard', false) }, 'Try recovery'),
+              phase !== 'starting' && phase !== 'recovering' && !(vm && vm.running && !iframeReady) && React.createElement('div', { className:'actions' },
+                React.createElement('button', {
+                  className:'btn btn-primary',
+                  onClick: recovery === 'restart-loop' ? ()=>attemptRecover('Manual aggressive recovery requested from restart-loop state', false) : attemptStart
+                }, recovery === 'restart-loop' ? 'Aggressive recovery' : 'Turn on VM'),
+                React.createElement('button', {
+                  className:'btn btn-secondary',
+                  onClick: ()=>attemptRecover(recovery.startsWith('protected-') ? 'Cautious recovery requested for protected VM from dashboard' : 'Manual recovery requested from dashboard', false)
+                }, recovery.startsWith('protected-') ? 'Cautious recovery' : 'Try recovery'),
                 React.createElement('button', { className:'btn btn-ghost', onClick: ()=>window.location.reload() }, 'Refresh')
               ),
               errorMsg && React.createElement('div', { className:'error-box' },
                 React.createElement('div', { className:'error-title' }, vm && vm.crashed ? 'The VM crashed and recovery failed.' : 'An error occurred while starting the VM.'),
                 React.createElement('div', { className:'error-message' }, errorMsg),
                 React.createElement('div', { className:'actions subactions' },
-                  React.createElement('button', { className:'btn btn-primary', onClick: ()=>attemptRecover(errorMsg || 'Retry requested after error', false) }, 'Try again'),
-                  React.createElement('button', { className:'btn btn-danger', onClick: sendToOpenClaw }, 'Send error to OpenClaw'),
+                  React.createElement('button', {
+                    className:'btn btn-primary',
+                    onClick: ()=>attemptRecover(errorMsg || 'Retry requested after error', false)
+                  }, recovery === 'restart-loop' ? 'Retry aggressive recovery' : (recovery.startsWith('protected-') ? 'Retry cautious recovery' : 'Try again')),
+                  React.createElement('button', { className:'btn btn-danger', onClick: sendToOpenClaw }, recovery === 'restart-loop' ? 'Escalate restart loop' : 'Send error to OpenClaw'),
                   React.createElement('button', { className:'btn btn-secondary', onClick: ()=>window.location.reload() }, 'Reload page')
                 )
               ),
