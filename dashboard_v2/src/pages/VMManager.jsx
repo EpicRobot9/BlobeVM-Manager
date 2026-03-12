@@ -1,14 +1,78 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Button from '../components/Button'
 import apiFetch from '../lib/fetchWrapper'
 import Modal from '../components/Modal'
 import VmExec from '../components/VmExec'
 import { useToasts } from '../components/ToastProvider'
 
-function StatusBadge({status}){
-  const s = (status||'').toLowerCase()
-  const color = s.includes('up') || s.includes('running') || s.includes('healthy') ? '#10b981' : (s.includes('rebuild') || s.includes('update') ? '#f59e0b' : '#ef4444')
-  return <div style={{display:'inline-flex',alignItems:'center',gap:8}}><span style={{width:10,height:10,background:color,borderRadius:8,display:'inline-block'}}></span><span style={{color:'var(--muted)'}}>{status}</span></div>
+function toneFor(status){
+  const s = (status || '').toLowerCase()
+  if(s.includes('up') || s.includes('running') || s.includes('healthy')) return 'live'
+  if(s.includes('rebuild') || s.includes('update')) return 'busy'
+  return 'down'
+}
+
+function StatusBadge({ status }){
+  const tone = toneFor(status)
+  const colors = {
+    live: ['#22c55e', '#14532d'],
+    busy: ['#f59e0b', '#78350f'],
+    down: ['#fb7185', '#4c0519']
+  }
+  const [dot, bg] = colors[tone]
+  return (
+    <div className="vm-status-badge" style={{ background:bg, color:'#fff' }}>
+      <span style={{ width:10, height:10, borderRadius:999, background:dot, boxShadow:`0 0 14px ${dot}` }} />
+      <span>{status || 'Unknown'}</span>
+    </div>
+  )
+}
+
+function StatMeter({ label, value, tone='cpu' }){
+  const safe = Math.max(0, Math.min(100, Number(value || 0)))
+  return (
+    <div className="vm-meter">
+      <div className="vm-meter-head">
+        <span>{label}</span>
+        <strong>{safe}%</strong>
+      </div>
+      <div className="vm-meter-track">
+        <div className={`vm-meter-fill ${tone}`} style={{ width: `${safe}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function VmCard({ vm, onAction, onDetails, busyAction }){
+  const tone = toneFor(vm.status)
+  return (
+    <div className={`vm-card vm-card-${tone}`}>
+      <div className="vm-card-top">
+        <div>
+          <div className="vm-card-name">{vm.name}</div>
+          <div className="vm-card-url"><a href={vm.url} target="_blank" rel="noreferrer">{vm.url}</a></div>
+        </div>
+        <StatusBadge status={vm.status || 'Unknown'} />
+      </div>
+
+      <div className="vm-card-stats">
+        <StatMeter label="CPU" value={vm._stats?.cpu_percent ?? 0} tone="cpu" />
+        <StatMeter label="RAM" value={vm._stats?.mem_percent ?? 0} tone="ram" />
+      </div>
+
+      <div className="vm-card-meta">
+        <div className="vm-meta-chip">Port: {vm.port || '—'}</div>
+        <div className="vm-meta-chip">Route: {tone === 'live' ? 'Ready' : 'Needs attention'}</div>
+      </div>
+
+      <div className="vm-card-actions">
+        <Button disabled={busyAction} onClick={()=>onAction('start', vm.name)}>Start</Button>
+        <Button disabled={busyAction} onClick={()=>onAction('stop', vm.name)}>Stop</Button>
+        <Button disabled={busyAction} onClick={()=>onAction('restart', vm.name)}>Restart</Button>
+        <Button disabled={busyAction} onClick={()=>onDetails(vm.name)}>Details</Button>
+      </div>
+    </div>
+  )
 }
 
 export default function VMManager(){
@@ -19,6 +83,7 @@ export default function VMManager(){
   const [logs, setLogs] = useState('')
   const [logLoading, setLogLoading] = useState(false)
   const [announcement, setAnnouncement] = useState('')
+  const [busyAction, setBusyAction] = useState('')
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
 
@@ -29,61 +94,49 @@ export default function VMManager(){
       const j = await rList.json().catch(()=>({instances:[]}))
       const statJ = rStats && rStats.ok ? await rStats.json().catch(()=>({vms:{}})) : (rStats && typeof rStats.json === 'function' ? await rStats.json().catch(()=>({vms:{}})) : {vms:{}})
       const statsMap = (statJ && statJ.vms) ? statJ.vms : {}
-        // The above mapping falls back to matching by VM name; ensure CPU/mem props exist
-        const insts = (j.instances || []).map(it => ({...it, _stats: statsMap[it.name] || statsMap[''+it.name] || statsMap[it.name]}))
+      const insts = (j.instances || []).map(it => ({...it, _stats: statsMap[it.name] || statsMap[''+it.name] || statsMap[it.name]}))
 
-        // Detect significant changes (announce via aria-live)
-        try{
-            const prev = prevStatsRef.current || {}
-            const now = Date.now()
-            // read adjustable thresholds from localStorage (fallbacks kept sensible)
-            const cpuThresholdDelta = parseFloat(localStorage.getItem('nbv2_announce_cpu_delta') || '20')
-            const memThresholdDelta = parseFloat(localStorage.getItem('nbv2_announce_mem_delta') || '25')
-            const cpuAbsolute = parseFloat(localStorage.getItem('nbv2_announce_cpu_absolute') || '85')
-            const memAbsolute = parseFloat(localStorage.getItem('nbv2_announce_mem_absolute') || '90')
-            const announceCooldownMs = parseInt(localStorage.getItem('nbv2_announce_cooldown') || String(60*1000), 10)
+      try{
+        const prev = prevStatsRef.current || {}
+        const now = Date.now()
+        const cpuThresholdDelta = parseFloat(localStorage.getItem('nbv2_announce_cpu_delta') || '20')
+        const memThresholdDelta = parseFloat(localStorage.getItem('nbv2_announce_mem_delta') || '25')
+        const cpuAbsolute = parseFloat(localStorage.getItem('nbv2_announce_cpu_absolute') || '85')
+        const memAbsolute = parseFloat(localStorage.getItem('nbv2_announce_mem_absolute') || '90')
+        const announceCooldownMs = parseInt(localStorage.getItem('nbv2_announce_cooldown') || String(60*1000), 10)
 
-            for(const [vm, s] of Object.entries(statsMap || {})){
-              const cpu = (s && typeof s.cpu_percent === 'number') ? s.cpu_percent : null
-              const mem = (s && typeof s.mem_percent === 'number') ? s.mem_percent : null
-              const p = prev[vm] || {}
-              const prevCpu = (p && typeof p.cpu_percent === 'number') ? p.cpu_percent : undefined
-              const prevMem = (p && typeof p.mem_percent === 'number') ? p.mem_percent : undefined
-              const lastAnn = lastAnnounceRef.current[vm] || 0
+        for(const [vm, s] of Object.entries(statsMap || {})){
+          const cpu = (s && typeof s.cpu_percent === 'number') ? s.cpu_percent : null
+          const mem = (s && typeof s.mem_percent === 'number') ? s.mem_percent : null
+          const p = prev[vm] || {}
+          const prevCpu = (p && typeof p.cpu_percent === 'number') ? p.cpu_percent : undefined
+          const prevMem = (p && typeof p.mem_percent === 'number') ? p.mem_percent : undefined
+          const lastAnn = lastAnnounceRef.current[vm] || 0
 
-              if(prevCpu !== undefined){
-                if(cpu !== null){
-                  if(((cpu - prevCpu) >= cpuThresholdDelta && cpu >= 30) || (cpu >= cpuAbsolute && prevCpu < cpuAbsolute)){
-                    if(now - lastAnn > announceCooldownMs){
-                      const msg = `Alert: VM ${vm} CPU ${cpu}% (was ${prevCpu}%)`
-                      setAnnouncement(msg)
-                      addToast({title:`VM ${vm} CPU`, message: `${cpu}% (was ${prevCpu}%)`, type:'warn', timeout:8000})
-                      lastAnnounceRef.current[vm] = now
-                      setTimeout(()=>{ setAnnouncement('') }, 8000)
-                    }
-                  }
-                }
-              }
-              if(prevMem !== undefined){
-                if(mem !== null){
-                  if(((mem - prevMem) >= memThresholdDelta && mem >= 40) || (mem >= memAbsolute && prevMem < memAbsolute)){
-                    if(now - lastAnn > announceCooldownMs){
-                      const msg = `Alert: VM ${vm} memory ${mem}% (was ${prevMem}%)`
-                      setAnnouncement(msg)
-                      addToast({title:`VM ${vm} Memory`, message: `${mem}% (was ${prevMem}%)`, type:'warn', timeout:8000})
-                      lastAnnounceRef.current[vm] = now
-                      setTimeout(()=>{ setAnnouncement('') }, 8000)
-                    }
-                  }
-                }
-              }
-            }
-        }catch(e){ /* no-op */ }
+          if(prevCpu !== undefined && cpu !== null && ((((cpu - prevCpu) >= cpuThresholdDelta) && cpu >= 30) || (cpu >= cpuAbsolute && prevCpu < cpuAbsolute)) && now - lastAnn > announceCooldownMs){
+            const msg = `Alert: VM ${vm} CPU ${cpu}% (was ${prevCpu}%)`
+            setAnnouncement(msg)
+            addToast({title:`VM ${vm} CPU`, message: `${cpu}% (was ${prevCpu}%)`, type:'warn', timeout:8000})
+            lastAnnounceRef.current[vm] = now
+            setTimeout(()=>setAnnouncement(''), 8000)
+          }
 
-        // update prev snapshot
-        prevStatsRef.current = statsMap || {}
-        setInstances(insts)
-    }catch(e){ console.error('load instances', e) }
+          if(prevMem !== undefined && mem !== null && ((((mem - prevMem) >= memThresholdDelta) && mem >= 40) || (mem >= memAbsolute && prevMem < memAbsolute)) && now - lastAnn > announceCooldownMs){
+            const msg = `Alert: VM ${vm} memory ${mem}% (was ${prevMem}%)`
+            setAnnouncement(msg)
+            addToast({title:`VM ${vm} Memory`, message: `${mem}% (was ${prevMem}%)`, type:'warn', timeout:8000})
+            lastAnnounceRef.current[vm] = now
+            setTimeout(()=>setAnnouncement(''), 8000)
+          }
+        }
+      }catch(e){}
+
+      prevStatsRef.current = statsMap || {}
+      setInstances(insts)
+    }catch(e){
+      console.error('load instances', e)
+      addToast({ title:'Load failed', message:String(e), type:'error', timeout:8000 })
+    }
     setLoading(false)
   }
 
@@ -97,14 +150,24 @@ export default function VMManager(){
       if(!stopped) tick()
     }
     tick()
-    return ()=>{ stopped=true }
+    return ()=>{ stopped = true }
   }, [])
 
   async function action(cmd, name){
+    const key = `${cmd}:${name}`
+    setBusyAction(key)
     try{
-      await apiFetch(`/${cmd}/${encodeURIComponent(name)}`, {method:'POST'})
-    }catch(e){ console.error('action error', e) }
-    // refresh list after short delay
+      const res = await apiFetch(`/${cmd}/${encodeURIComponent(name)}`, { method:'POST' })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false){
+        throw new Error(body.error || body.message || `Failed to ${cmd} ${name}`)
+      }
+      addToast({ title:`${name}`, message:`${cmd} request sent successfully`, type:'success', timeout:5000 })
+    }catch(e){
+      console.error('action error', e)
+      addToast({ title:`${name}`, message:String(e), type:'error', timeout:8000 })
+    }
+    setBusyAction('')
     setTimeout(load, 800)
   }
 
@@ -118,89 +181,79 @@ export default function VMManager(){
     try{
       const r = await apiFetch(`/vm/logs/${encodeURIComponent(name)}`)
       const j = await r.json().catch(()=>({ok:false, logs:''}))
-      setLogs(j.logs || j.logs === '' ? (j.logs||'') : (j.error||''))
-    }catch(e){ setLogs('Error loading logs: '+String(e)) }
+      setLogs(j.logs || j.logs === '' ? (j.logs || '') : (j.error || ''))
+    }catch(e){
+      setLogs('Error loading logs: ' + String(e))
+    }
     setLogLoading(false)
   }
 
   useEffect(()=>{
     let iv
-    if(selected){
-      iv = setInterval(()=>fetchLogs(selected), 2500)
-    }
+    if(selected) iv = setInterval(()=>fetchLogs(selected), 2500)
     return ()=>{ if(iv) clearInterval(iv) }
   }, [selected])
+
+  const summary = useMemo(()=>{
+    const total = instances.length
+    const live = instances.filter(x => toneFor(x.status) === 'live').length
+    const down = instances.filter(x => toneFor(x.status) === 'down').length
+    const busy = instances.filter(x => toneFor(x.status) === 'busy').length
+    return { total, live, down, busy }
+  }, [instances])
 
   return (
     <div>
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
-      <h1 style={{marginTop:0}}>VM Manager</h1>
-      <div className="glass-card">
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <div style={{color:'var(--muted)'}}>Manage your VMs — start/stop/restart and view details.</div>
-          <div>
-            <Button onClick={load} style={{marginLeft:8}}>Refresh</Button>
-          </div>
+      <div className="vm-page-hero glass-card">
+        <div>
+          <div className="eyebrow">Dashboard v2</div>
+          <h1 style={{margin:'8px 0 10px'}}>VM Control Center</h1>
+          <div style={{color:'var(--muted)', maxWidth:760}}>Modernized VM management, live load telemetry, and quick actions for when one of your little desktop goblins decides to fall over.</div>
         </div>
-        <div style={{marginTop:12}}>
-          {loading ? <div className="skeleton" style={{height:200}} /> : (
-            <table style={{width:'100%',borderCollapse:'collapse'}}>
-              <thead><tr style={{textAlign:'left'}}><th>Name</th><th>Status</th><th>Port</th><th>URL</th><th>Actions</th></tr></thead>
-              <tbody>
-                {instances.map(it=> (
-                  <tr key={it.name} style={{borderBottom:'1px solid rgba(255,255,255,0.03)'}}>
-                    <td style={{padding:'8px 6px'}}>{it.name}</td>
-                    <td style={{padding:'8px 6px'}}><StatusBadge status={it.status||''} /></td>
-                      <td style={{padding:'8px 6px'}}>{it.port || ''}</td>
-                      <td style={{padding:'8px 6px',width:260}}>
-                        {it._stats ? (
-                          <div style={{display:'flex',flexDirection:'column',gap:8}}>
-                            <div className="stat-row">
-                              <div className="stat-bar" aria-hidden="true">
-                                <div className="stat-fill" style={{width: `${Math.min(100, it._stats.cpu_percent || 0)}%`}} />
-                                <div className="tooltip">CPU: {it._stats.cpu_percent}%</div>
-                              </div>
-                              <div className="stat-label">{it._stats.cpu_percent}%</div>
-                            </div>
-                            <div className="stat-row">
-                              <div className="stat-bar" aria-hidden="true">
-                                <div className="stat-fill ram" style={{width: `${Math.min(100, it._stats.mem_percent || 0)}%`}} />
-                                <div className="tooltip">RAM: {it._stats.mem_percent}%</div>
-                              </div>
-                              <div className="stat-label">{it._stats.mem_percent}%</div>
-                            </div>
-                          </div>
-                        ) : <div style={{color:'var(--muted)'}}>—</div>}
-                      </td>
-                    <td style={{padding:'8px 6px'}}><a href={it.url} target="_blank" rel="noreferrer" style={{color:'var(--blue-500)'}}>{it.url}</a></td>
-                    <td style={{padding:'8px 6px',display:'flex',gap:8}}>
-                      <Button onClick={()=>action('start', it.name)}>Start</Button>
-                      <Button onClick={()=>action('stop', it.name)}>Stop</Button>
-                      <Button onClick={()=>action('restart', it.name)}>Restart</Button>
-                      <Button onClick={()=>openDetails(it.name)}>Details</Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <div className="vm-summary-grid">
+          <div className="summary-pill"><strong>{summary.total}</strong><span>Total</span></div>
+          <div className="summary-pill live"><strong>{summary.live}</strong><span>Running</span></div>
+          <div className="summary-pill warn"><strong>{summary.busy}</strong><span>Busy</span></div>
+          <div className="summary-pill danger"><strong>{summary.down}</strong><span>Down</span></div>
+        </div>
+      </div>
+
+      <div className="glass-card" style={{marginTop:16}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12, flexWrap:'wrap'}}>
+          <div style={{color:'var(--muted)'}}>Manage your VMs, inspect logs, and jump into the wrapper view that now handles down/crashed states properly.</div>
+          <Button onClick={load}>Refresh</Button>
+        </div>
+
+        <div style={{marginTop:18}}>
+          {loading ? (
+            <div className="vm-card-grid">
+              {Array.from({ length:4 }).map((_, i)=><div key={i} className="skeleton" style={{height:220,borderRadius:20}} />)}
+            </div>
+          ) : instances.length === 0 ? (
+            <div className="vm-empty-state">No VMs found. Wow. An empty fleet. Very intimidating.</div>
+          ) : (
+            <div className="vm-card-grid">
+              {instances.map(vm => <VmCard key={vm.name} vm={vm} onAction={action} onDetails={openDetails} busyAction={!!busyAction} />)}
+            </div>
           )}
         </div>
       </div>
 
-      <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>setSelected(null)} width={1100}>
-        <div style={{display:'flex',gap:12}}>
-          <div style={{flex:1}}>
-            <iframe src={`/dashboard/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:320,border:'1px solid rgba(255,255,255,0.04)'}} />
+      <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>setSelected(null)} width={1180}>
+        <div style={{display:'flex',gap:12, flexWrap:'wrap'}}>
+          <div style={{flex:'1 1 620px'}}>
+            <iframe title={`VM ${selected}`} src={`/dashboard/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:360,border:'1px solid rgba(255,255,255,0.04)', background:'#020617'}} />
             <div style={{marginTop:12}}>
               <VmExec vmName={selected} />
             </div>
           </div>
-          <div style={{width:420,display:'flex',flexDirection:'column',gap:8}}>
+          <div style={{width:420,maxWidth:'100%',display:'flex',flexDirection:'column',gap:8}}>
             <div style={{fontSize:13,color:'var(--muted)'}}>Console / Logs</div>
-            <div style={{background:'#000',color:'#0ff',padding:8,borderRadius:6,height:420,overflow:'auto',fontFamily:'monospace',fontSize:12}}>
+            <div style={{background:'#02040a',color:'#dff',padding:12,borderRadius:12,height:460,overflow:'auto',fontFamily:'monospace',fontSize:12,border:'1px solid rgba(255,255,255,0.04)'}}>
               {logLoading ? <div>Loading logs…</div> : <pre style={{whiteSpace:'pre-wrap',margin:0}}>{logs}</pre>}
             </div>
-            <div style={{display:'flex',gap:8}}>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
               <Button onClick={()=>fetchLogs(selected)}>Refresh Logs</Button>
               <a href={`/dashboard/vm/${encodeURIComponent(selected)}/`} target="_blank" rel="noreferrer"><Button>Open in new tab</Button></a>
             </div>

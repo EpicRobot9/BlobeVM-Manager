@@ -1,25 +1,25 @@
-// Defines a global hook `useVMStatus(vmname, opts)` that components can call.
-// Relies on React being available as a global.
 (function(){
   window.useVMStatus = function(vmname, opts){
     const interval = (opts && opts.interval) || 1500;
     const { useState, useEffect } = React;
     return (function useHook(){
-      const [status, setStatus] = useState(null);
+      const [state, setState] = useState({ ok:true, status:'unknown', state:'unknown', running:false, healthy:false, crashed:false, exists:false });
       useEffect(()=>{
         let cancelled = false;
         let handle = null;
         async function pollOnce(){
           try{
             const j = await window.api.getVMStatus(vmname);
-            if(!cancelled) setStatus(j && j.status ? j.status : (j && j.ok===false ? 'unknown' : null));
-          }catch(e){ if(!cancelled) setStatus('unknown'); }
+            if(!cancelled) setState(j && typeof j === 'object' ? j : { ok:false, status:'unknown', state:'unknown' });
+          }catch(e){
+            if(!cancelled) setState({ ok:false, error:String(e), status:'unknown', state:'unknown', running:false, healthy:false, crashed:false, exists:false });
+          }
         }
         pollOnce();
         handle = setInterval(pollOnce, interval);
         return ()=>{ cancelled = true; if(handle) clearInterval(handle); };
       }, [vmname, interval]);
-      return status;
+      return state;
     })();
   };
 })();

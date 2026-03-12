@@ -1,19 +1,31 @@
-// Main bootstrap: reads init from window.__VM_WRAPPER_INIT and mounts App
 (function(){
   const React = window.React;
   const ReactDOM = window.ReactDOM;
-  const { useState, useEffect } = React;
-  const init = window.__VM_WRAPPER_INIT || { vmname: null, vmurl: null };
+  const init = window.__VM_WRAPPER_INIT || { vmname:null, vmurl:null };
+
   function App(){
-    const status = window.useVMStatus(init.vmname, {interval:1500});
-    if(status && /up/i.test(status)){
-      const f = document.getElementById('vmframe'); if(f) f.style.display='block';
-      return null;
-    }
-    return React.createElement(window.VMFallback, {vmname: init.vmname, vmurl: init.vmurl});
+    const vm = window.useVMStatus(init.vmname, { interval: 1600 });
+    const live = !!(vm && vm.running);
+
+    React.useEffect(()=>{
+      const frame = document.getElementById('vmframe');
+      if(!frame) return;
+      if(live){
+        frame.style.display = 'block';
+        if(vm.url && frame.src !== vm.url) frame.src = vm.url;
+      } else {
+        frame.style.display = 'none';
+      }
+    }, [live, vm && vm.url]);
+
+    if(live) return null;
+    return React.createElement(window.VMFallback, { vmname:init.vmname, vmurl:vm && vm.url ? vm.url : init.vmurl });
   }
-  try{
+
+  try {
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(React.createElement(App));
-  }catch(e){ console.error('VM wrapper mount failed', e); }
+  } catch (e) {
+    console.error('VM wrapper mount failed', e);
+  }
 })();

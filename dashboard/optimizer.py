@@ -22,6 +22,8 @@ LOG_DIR = '/var/blobe/logs/optimizer'
 CFG_PATH = os.path.join(STATE_DIR, '.optimizer.json')
 RESTART_META_DIR = os.path.join(STATE_DIR, '.optimizer_restarts')
 LAST_RESTART_PATH = os.path.join(STATE_DIR, '.optimizer_last_restart')
+LAST_RUN_PATH = os.path.join(STATE_DIR, '.optimizer_last_run.json')
+ACTION_META_DIR = os.path.join(STATE_DIR, '.optimizer_actions')
 
 DEFAULT_CFG = {
     'enabled': True,
@@ -32,6 +34,8 @@ DEFAULT_CFG = {
     'memoryLimit': '1g',
     'memorySwappiness': 10,
     'containerRestartCooldownMinutes': 10,
+    'guardCooldownSeconds': 300,
+    'maxActionsPerRun': 3,
 }
 
 
@@ -149,6 +153,37 @@ def enforce_strict_memory(cfg: dict):
         log(f'enforceStrictMemory error {e}')
 
 
+def _action_allowed(name: str, action: str, cooldown: int):
+    try:
+        os.makedirs(ACTION_META_DIR, exist_ok=True)
+        safe = re.sub(r'[^A-Za-z0-9_.-]', '_', f'{name}.{action}')
+        path = os.path.join(ACTION_META_DIR, safe + '.last')
+        now = int(time.time())
+        last = 0
+        if os.path.isfile(path):
+            try:
+                last = int(open(path, 'r').read().strip())
+            except Exception:
+                last = 0
+        if now - last < max(0, int(cooldown)):
+            log(f'skip {action} for {name} (cooldown {cooldown}s)')
+            return False
+        with open(path, 'w') as f:
+            f.write(str(now))
+        return True
+    except Exception:
+        return True
+
+
+def _record_last_run(events, stats=None):
+    try:
+        payload = {'ts': int(time.time()), 'events': events or [], 'stats': stats or {}}
+        with open(LAST_RUN_PATH, 'w') as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        log(f'failed writing last run: {e}')
+
+
 def _read_last_restart():
     try:
         with open(LAST_RESTART_PATH, 'r') as f:
@@ -233,6 +268,9 @@ def _run_memory_guard(cfg):
                 perc = 0.0
             threshold = cfg.get('memoryThreshold', 60)
             if perc >= threshold:
+                cooldown = int(cfg.get('guardCooldownSeconds', 300))
+                if not _action_allowed(name, 'memory-restart', cooldown):
+                    continue
                 log(f'Restarting {name} due to memory {perc}%')
                 try:
                     subprocess.check_call(['docker', 'restart', name])
@@ -262,6 +300,9 @@ def _run_cpu_guard(cfg):
             threshold = cfg.get('cpuThreshold', 70)
             if perc >= threshold:
                 # best-effort second check omitted
+                cooldown = int(cfg.get('guardCooldownSeconds', 300))
+                if not _action_allowed(name, 'cpu-restart', cooldown):
+                    continue
                 log(f'Restarting {name} due to cpu {perc}%')
                 try:
                     subprocess.check_call(['docker', 'restart', name])
@@ -341,10 +382,16 @@ def _run_health_guard(cfg):
                             log(f'Health warn for {name}'); open(f1, 'w').write(str(int(time.time())))
                             return {'action': 'warn', 'name': name}
                         if not os.path.exists(f2):
+                            cooldown = int(cfg.get('guardCooldownSeconds', 300))
+                            if not _action_allowed(name, 'health-restart', cooldown):
+                                return {'action': 'cooldown', 'name': name, 'reason': 'health-restart'}
                             log(f'Health restart container {name}'); open(f2, 'w').write(str(int(time.time())))
                             subprocess.check_call(['docker', 'restart', f'blobevm_{name}'])
                             return {'action': 'restart_container', 'name': name}
                         # recreate
+                        cooldown = int(cfg.get('guardCooldownSeconds', 300))
+                        if not _action_allowed(name, 'health-recreate', cooldown):
+                            return {'action': 'cooldown', 'name': name, 'reason': 'health-recreate'}
                         log(f'Health recreate {name}')
                         try:
                             subprocess.check_call(['blobe-vm-manager', 'recreate', name])
@@ -357,6 +404,9 @@ def _run_health_guard(cfg):
                     if not os.path.exists(f1):
                         log(f'Health warn (curl fail) for {name}'); open(f1, 'w').write(str(int(time.time())))
                         return {'action': 'warn', 'name': name}
+                    cooldown = int(cfg.get('guardCooldownSeconds', 300))
+                    if not _action_allowed(name, 'health-curlfail-restart', cooldown):
+                        return {'action': 'cooldown', 'name': name, 'reason': 'health-curlfail-restart'}
                     log(f'Health restart container (curl fail) {name}'); subprocess.check_call(['docker', 'restart', f'blobevm_{name}'])
                     return {'action': 'restart_container', 'name': name}
             except Exception:
@@ -369,19 +419,24 @@ def _run_health_guard(cfg):
 def run_once():
     cfg = load_config()
     events = []
+    max_actions = max(1, int(cfg.get('maxActionsPerRun', 3)))
     try:
+        guards = []
         if cfg.get('guards', {}).get('memory'):
-            r = _run_memory_guard(cfg)
-            if r: events.append(r)
+            guards.append(_run_memory_guard)
         if cfg.get('guards', {}).get('cpu'):
-            r = _run_cpu_guard(cfg)
-            if r: events.append(r)
+            guards.append(_run_cpu_guard)
         if cfg.get('guards', {}).get('swap'):
-            r = _run_swap_guard(cfg)
-            if r: events.append(r)
+            guards.append(_run_swap_guard)
         if cfg.get('guards', {}).get('health'):
-            r = _run_health_guard(cfg)
-            if r: events.append(r)
+            guards.append(_run_health_guard)
+        for guard in guards:
+            if len(events) >= max_actions:
+                log(f'maxActionsPerRun reached ({max_actions}), stopping guard execution early')
+                break
+            r = guard(cfg)
+            if r:
+                events.append(r)
         if cfg.get('strictMemoryLimit'):
             try:
                 enforce_strict_memory(cfg)
@@ -389,6 +444,7 @@ def run_once():
                 log(f'error enforcing strictMemoryLimit: {e}')
     except Exception as e:
         log(f'error in run_once: {e}')
+    _record_last_run(events, gather_stats())
     return events
 
 
@@ -428,12 +484,18 @@ def status():
     cfg = load_config()
     stats = gather_stats()
     last = 0
+    last_run = {}
     try:
         if os.path.isfile(LAST_RESTART_PATH):
             last = int(open(LAST_RESTART_PATH, 'r').read().strip())
     except Exception:
         last = 0
-    return {'cfg': cfg, 'stats': stats, 'lastRestart': last}
+    try:
+        if os.path.isfile(LAST_RUN_PATH):
+            last_run = json.load(open(LAST_RUN_PATH, 'r'))
+    except Exception:
+        last_run = {}
+    return {'cfg': cfg, 'stats': stats, 'lastRestart': last, 'lastRun': last_run}
 
 
 def set_config(key, val):

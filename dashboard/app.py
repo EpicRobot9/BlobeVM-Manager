@@ -1217,6 +1217,137 @@ def _write_env_kv(updates: dict):
 def _docker(*args):
     return subprocess.run(['docker', *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
+
+def _docker_inspect_vm(name: str):
+    cname = f'blobevm_{name}'
+    r = _docker('inspect', cname)
+    if r.returncode != 0:
+        return None, r.stderr.strip() or 'inspect failed'
+    try:
+        data = json.loads(r.stdout or '[]')
+        if not data:
+            return None, 'not-found'
+        return data[0], None
+    except Exception as e:
+        return None, str(e)
+
+
+def _vm_status_payload(name: str):
+    info, err = _docker_inspect_vm(name)
+    url = _build_vm_url(name) or ''
+    payload = {
+        'ok': True,
+        'name': name,
+        'url': url,
+        'exists': False,
+        'running': False,
+        'healthy': False,
+        'state': 'not-found',
+        'status': 'not-found',
+        'detail': err or 'VM container was not found',
+        'crashed': False,
+        'startedAt': None,
+        'finishedAt': None,
+        'exitCode': None,
+        'error': '',
+        'port': _vm_host_port(f'blobevm_{name}') or ''
+    }
+    if not info:
+        return payload
+    state = (info.get('State') or {}) if isinstance(info, dict) else {}
+    payload['exists'] = True
+    payload['running'] = bool(state.get('Running'))
+    payload['healthy'] = (state.get('Health') or {}).get('Status') == 'healthy' if isinstance(state.get('Health'), dict) else payload['running']
+    payload['status'] = state.get('Status') or ('running' if payload['running'] else 'stopped')
+    payload['state'] = payload['status']
+    payload['detail'] = state.get('Error') or state.get('Status') or ''
+    payload['startedAt'] = state.get('StartedAt')
+    payload['finishedAt'] = state.get('FinishedAt')
+    payload['exitCode'] = state.get('ExitCode')
+    payload['error'] = state.get('Error') or ''
+    oomkilled = bool(state.get('OOMKilled'))
+    restarting = bool(state.get('Restarting'))
+    payload['oomKilled'] = oomkilled
+    payload['restarting'] = restarting
+    payload['crashed'] = (not payload['running']) and ((payload['exitCode'] not in (None, 0)) or oomkilled or bool(payload['error']) or restarting or payload['status'] in ('exited', 'dead'))
+    return payload
+
+
+def _tail_vm_logs(name: str, lines: int = 160) -> str:
+    cname = f'blobevm_{name}'
+    try:
+        r = _docker('logs', '--tail', str(lines), cname)
+        if r.returncode == 0:
+            return (r.stdout or '') + (("\n" + r.stderr) if r.stderr else '')
+        return r.stderr.strip() or r.stdout.strip() or ''
+    except Exception as e:
+        return str(e)
+
+
+def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True):
+    attempts = []
+    before = _vm_status_payload(name)
+    if before.get('running') and not before.get('crashed'):
+        return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': before, 'message': 'VM already running'}
+    sequence = ['start']
+    if before.get('crashed') or aggressive:
+        sequence.append('restart')
+    if aggressive:
+        sequence.append('recreate')
+    for action in sequence:
+        try:
+            proc = subprocess.run([MANAGER, action, name], capture_output=True, text=True, timeout=90)
+            attempt = {
+                'action': action,
+                'ok': proc.returncode == 0,
+                'stdout': (proc.stdout or '').strip()[-2000:],
+                'stderr': (proc.stderr or '').strip()[-2000:],
+                'returncode': proc.returncode,
+            }
+        except Exception as e:
+            attempt = {'action': action, 'ok': False, 'stdout': '', 'stderr': str(e), 'returncode': None}
+        attempts.append(attempt)
+        time.sleep(2.5)
+        current = _vm_status_payload(name)
+        if current.get('running') and (current.get('healthy') or current.get('state') == 'running'):
+            return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': current, 'message': f'VM recovered via {action}', 'source': source}
+    final = _vm_status_payload(name)
+    return {'ok': False, 'recovered': False, 'attempts': attempts, 'status': final, 'message': 'VM recovery failed', 'source': source}
+
+
+def _escalate_vm_to_openclaw(name: str, reason: str, extra=None):
+    extra = extra or {}
+    payload = {
+        'vm': name,
+        'reason': reason,
+        'status': _vm_status_payload(name),
+        'logs': _tail_vm_logs(name, 120),
+        'extra': extra,
+        'ts': int(time.time()),
+        'host': socket.gethostname(),
+    }
+    esc_dir = os.path.join(_state_dir(), 'dashboard', 'escalations')
+    os.makedirs(esc_dir, exist_ok=True)
+    esc_path = os.path.join(esc_dir, f"{name}-{payload['ts']}.json")
+    with open(esc_path, 'w') as f:
+        json.dump(payload, f, indent=2)
+    msg = (
+        f"BlobeVM escalation from dashboard on host {payload['host']}. "
+        f"VM '{name}' needs recovery help. Reason: {reason}. "
+        f"Status: {json.dumps(payload['status'])}. "
+        f"Recent logs:\n{payload['logs'][:3000]}"
+    )
+    delivered = False
+    cli_error = ''
+    try:
+        proc = subprocess.run(['openclaw', 'agent', '--to', 'agent:main:main', '--message', msg], capture_output=True, text=True, timeout=45)
+        delivered = proc.returncode == 0
+        if not delivered:
+            cli_error = (proc.stderr or proc.stdout or '').strip()[:1200]
+    except Exception as e:
+        cli_error = str(e)
+    return {'ok': True, 'queued': delivered, 'path': esc_path, 'cliError': cli_error, 'payload': payload}
+
 @app.get('/dashboard/api/modeinfo')
 @auth_required
 def api_modeinfo():
@@ -1564,20 +1695,47 @@ def dashboard_vm_wrapper(name):
             <title>__TITLE__</title>
             __FAV__
             <style>
+                :root{color-scheme:dark;--bg:#050816;--bg2:#0b1226;--card:rgba(12,18,38,.72);--line:rgba(255,255,255,.08);--text:#eef4ff;--muted:#9db0d1;--primary:#5ea2ff;--primary2:#7c3aed;--danger:#ff5c7a;--success:#22c55e;--warning:#f59e0b}
                 html,body,#root{height:100%;margin:0}
-                body{font-family:system-ui,Arial;background:#000;color:#fff}
-                .vm-iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:none;background:#000}
-                .fallback{display:flex;align-items:center;justify-content:center;height:100%;background:#0b1020;color:#fff}
-                .card{max-width:720px;padding:28px;border-radius:8px;text-align:center;background:linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01));box-shadow:0 8px 30px rgba(2,6,23,0.6)}
-                .vm-name{font-size:28px;margin-bottom:14px}
-                .btn-primary{background:#2563eb;color:#fff;border:none;padding:12px 20px;border-radius:8px;font-size:16px;cursor:pointer}
-                .btn-secondary{background:#374151;color:#fff;border:none;padding:8px 12px;border-radius:6px;font-size:14px;cursor:pointer}
-                .muted{opacity:.8;color:#9ca3af;margin-top:10px}
-                .errbox{background:#7f1d1d;color:#ffdede;padding:10px;border-radius:6px;margin-top:12px}
-                .spinner{width:48px;height:48px;border-radius:50%;border:6px solid rgba(255,255,255,0.12);border-top-color:#60a5fa;animation:spin 1s linear infinite;margin:14px auto}
+                body{font-family:Inter,system-ui,Arial,sans-serif;background:radial-gradient(circle at top,#101933 0%,#050816 58%,#03050d 100%);color:var(--text);overflow:hidden}
+                .vm-iframe{position:fixed;inset:0;width:100%;height:100%;border:none;background:#000}
+                .fallback{display:flex;align-items:center;justify-content:center;height:100%;padding:28px;background:radial-gradient(circle at 20% 20%,rgba(94,162,255,.12),transparent 35%),radial-gradient(circle at 80% 0%,rgba(124,58,237,.12),transparent 28%),linear-gradient(180deg,var(--bg2),var(--bg));color:var(--text)}
+                .shell{width:min(100%,1040px);position:relative}
+                .status-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:rgba(255,255,255,.05);padding:10px 14px;border-radius:999px;font-size:13px;color:#dbeafe;backdrop-filter:blur(16px);margin-bottom:18px;box-shadow:0 12px 30px rgba(0,0,0,.25)}
+                .hero-card{position:relative;overflow:hidden;padding:32px;border-radius:28px;border:1px solid var(--line);background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.03));backdrop-filter:blur(22px);box-shadow:0 30px 80px rgba(0,0,0,.42)}
+                .hero-content{position:relative;z-index:2}
+                .orb{position:absolute;border-radius:50%;filter:blur(14px);opacity:.6}
+                .orb-a{width:220px;height:220px;right:-50px;top:-40px;background:radial-gradient(circle,#5ea2ff,transparent 65%)}
+                .orb-b{width:260px;height:260px;left:-80px;bottom:-120px;background:radial-gradient(circle,#7c3aed,transparent 65%)}
+                .vm-name{font-size:14px;letter-spacing:.24em;text-transform:uppercase;color:#b6c7e6;margin-bottom:10px}
+                .hero-title{font-size:clamp(32px,5vw,56px);line-height:1.02;margin:0 0 14px;font-weight:800}
+                .hero-subtitle{max-width:760px;font-size:17px;line-height:1.6;color:var(--muted);margin:0 0 18px}
+                .meta-row{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0 24px}
+                .meta-chip{padding:10px 12px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.06);font-size:13px;color:#dce8ff}
+                .actions{display:flex;flex-wrap:wrap;gap:12px}
+                .btn{appearance:none;border:none;border-radius:14px;padding:13px 18px;font-size:15px;font-weight:700;cursor:pointer;transition:transform .18s ease,opacity .18s ease,box-shadow .18s ease}
+                .btn:hover{transform:translateY(-1px)}
+                .btn-primary{background:linear-gradient(135deg,var(--primary),var(--primary2));color:white;box-shadow:0 18px 40px rgba(94,162,255,.22)}
+                .btn-secondary{background:rgba(255,255,255,.08);color:#eef4ff;border:1px solid rgba(255,255,255,.08)}
+                .btn-ghost{background:transparent;color:#d8e6ff;border:1px solid rgba(255,255,255,.12)}
+                .btn-danger{background:linear-gradient(135deg,#fb7185,var(--danger));color:white;box-shadow:0 18px 40px rgba(255,92,122,.2)}
+                .loading-wrap{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:16px 0}
+                .loading-title{font-size:18px;font-weight:700}
+                .loading-subtitle{color:var(--muted)}
+                .spinner{width:52px;height:52px;border-radius:50%;border:5px solid rgba(255,255,255,.12);border-top-color:var(--primary);animation:spin 1s linear infinite;margin:6px 0}
+                .error-box,.sent-box,.details-box{margin-top:18px}
+                .error-box,.sent-box{padding:16px 18px;border-radius:18px;border:1px solid rgba(255,255,255,.08)}
+                .error-box{background:linear-gradient(180deg,rgba(127,29,29,.55),rgba(60,12,20,.7));color:#ffe4e6}
+                .sent-box{background:linear-gradient(180deg,rgba(22,101,52,.45),rgba(8,35,25,.7));color:#dcfce7}
+                .error-title{font-weight:800;font-size:16px;margin-bottom:8px}
+                .error-message{white-space:pre-wrap;line-height:1.5}
+                .subactions{margin-top:14px}
+                .details-box{padding:14px 16px;white-space:pre-wrap;overflow:auto;max-height:240px;border-radius:18px;background:rgba(3,8,23,.75);border:1px solid rgba(255,255,255,.07);color:#d9e7ff}
+                .tone-crashed .status-pill{border-color:rgba(255,92,122,.25);color:#ffd5de}
+                .tone-down .status-pill{border-color:rgba(245,158,11,.25);color:#ffe8ba}
+                .tone-live .status-pill{border-color:rgba(34,197,94,.25);color:#dcfce7}
                 @keyframes spin{to{transform:rotate(360deg)}}
-                .fade-enter{opacity:0;transform:translateY(6px)}
-                .fade-enter-active{opacity:1;transform:none;transition:opacity .25s,transform .25s}
+                @media (max-width: 720px){.fallback{padding:16px}.hero-card{padding:20px;border-radius:22px}.actions{flex-direction:column}.btn{width:100%}.hero-subtitle{font-size:15px}}
             </style>
         </head>
         <body>
@@ -1985,17 +2143,36 @@ def api_start(name):
 @app.get('/dashboard/api/vm/<name>/status')
 @auth_required
 def api_vm_status(name):
-    """Return status string for the VM container (e.g., 'Up Xs', 'Exited (0) Y ago')."""
+    """Return rich state for the VM container."""
     try:
-        cname = f'blobevm_{name}'
-        r = _docker('ps', '-a', '--filter', f'name=^{cname}$', '--format', '{{.Status}}')
-        if r.returncode != 0:
-            return jsonify({'ok': False, 'error': r.stderr.strip() or 'docker error'}), 500
-        status = r.stdout.strip()
-        if not status:
-            # container not found
-            return jsonify({'ok': True, 'status': 'not-found'})
-        return jsonify({'ok': True, 'status': status})
+        return jsonify(_vm_status_payload(name))
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/vm/<name>/recover')
+@auth_required
+def api_vm_recover(name):
+    try:
+        data = request.get_json(silent=True) or {}
+        aggressive = bool(data.get('aggressive', True)) if isinstance(data, dict) else True
+        result = _recover_vm(name, source='dashboard', aggressive=aggressive)
+        return jsonify(result), (200 if result.get('ok') else 500)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/vm/<name>/escalate')
+@auth_required
+def api_vm_escalate(name):
+    try:
+        data = request.get_json(silent=True) or {}
+        reason = data.get('reason') if isinstance(data, dict) else None
+        if not reason:
+            reason = 'Dashboard escalation requested by user'
+        rec = _recover_vm(name, source='openclaw-escalation', aggressive=True)
+        esc = _escalate_vm_to_openclaw(name, reason, {'recovery': rec, 'request': data})
+        return jsonify({'ok': True, 'recovery': rec, 'escalation': esc})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -2685,7 +2862,7 @@ def api_optimizer_status():
     """Return optimizer status and stats via embedded optimizer module."""
     try:
         s = dash_optimizer.status()
-        return jsonify({'ok': True, 'cfg': s.get('cfg'), 'stats': s.get('stats'), 'lastRestart': s.get('lastRestart')})
+        return jsonify({'ok': True, 'cfg': s.get('cfg'), 'stats': s.get('stats'), 'lastRestart': s.get('lastRestart'), 'lastRun': s.get('lastRun')})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
