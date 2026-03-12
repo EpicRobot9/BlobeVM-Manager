@@ -32,6 +32,9 @@ RUN \
   # Fix Kasm path-mode websocket URL under subfolder routing:
   # use an absolute subfolder path (/vm/<name>/websockify), not relative vm/<name>/websockify
   perl -0777 -i -pe "s/PATH = '&path=' \+ SUBFOLDER\.substring\(1\) \+ 'websockify'/PATH = '&path=' + SUBFOLDER + 'websockify'/g" /kclient/index.js && \
+  # KasmVNC websocket endpoint is served at '/' on port 6901 in current base image;
+  # keep external URL at /websockify but strip that prefix at nginx proxy_pass.
+  sed -i 's#proxy_pass               http://127.0.0.1:6901;#proxy_pass               http://127.0.0.1:6901/;#g' /etc/nginx/sites-available/default && \
   echo "**** cleanup ****" && \
   apt-get autoclean && \
   rm -rf \

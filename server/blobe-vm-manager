@@ -276,9 +276,6 @@ common_labels() {
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}-path.service=${name}-path"
-      # Strip the prefix for path router in domain mode since containers serve at '/'
-      "--label=traefik.http.middlewares.${name}-path-stripprefix.stripprefix.prefixes=${prefix_path}"
-      "--label=traefik.http.routers.${name}-path.middlewares=${name}-path-stripprefix"
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
@@ -292,7 +289,6 @@ common_labels() {
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
-        "--label=traefik.http.routers.${name}-path-secure.middlewares=${name}-path-stripprefix"
       )
       labels+=(
         "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
@@ -348,24 +344,19 @@ run_container() {
 
   local subfolder="/"
   if [[ "${NO_TRAEFIK}" -ne 1 ]]; then
-    if [[ -z "${BLOBEVM_DOMAIN:-}" || -n "$(get_meta "$name" path_override || true)" || -n "$(get_meta "$name" host_override || true)" ]]; then
-      local pfx
-      pfx="$(get_meta "$name" path_override || true)"
-      local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
-      if [[ -n "$pfx" ]]; then
-        [[ "$pfx" != /* ]] && pfx="/$pfx"
-        [[ "$pfx" != */ ]] && pfx="$pfx/"
-        subfolder="$pfx"
-      else
-        subfolder="${base_path}/${name}/"
-      fi
-      [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
-    elif [[ "${MERGED_MODE:-0}" -eq 1 ]]; then
-      # In merged single-port mode, always serve under base path for consistency
-      local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+    # Always set SUBFOLDER for path access (/vm/<name>/...) so Kasm websocket path
+    # stays under the VM prefix instead of falling back to /websockify.
+    local pfx
+    pfx="$(get_meta "$name" path_override || true)"
+    local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+    if [[ -n "$pfx" ]]; then
+      [[ "$pfx" != /* ]] && pfx="/$pfx"
+      [[ "$pfx" != */ ]] && pfx="$pfx/"
+      subfolder="$pfx"
+    else
       subfolder="${base_path}/${name}/"
-      [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
     fi
+    [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
   fi
 
   local publish_args=()
