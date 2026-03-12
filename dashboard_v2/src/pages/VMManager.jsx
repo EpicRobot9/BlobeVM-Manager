@@ -99,11 +99,19 @@ function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshi
         <div className="vm-meta-chip">Pressure: {meta.pressure || 'low'}</div>
         <div className="vm-meta-chip">Profile: {meta.profile || 'desktop'}</div>
         {meta.protected && <div className="vm-meta-chip protected">Protected</div>}
+        {meta.unstable && <div className="vm-meta-chip unstable">Unstable</div>}
       </div>
 
       <div className="vm-card-profile-row">
         <span className="vm-profile-label">Profile</span>
         <ProfileSelect value={meta.profile || 'desktop'} disabled={busyAction} onChange={(next)=>onProfileChange(vm.name, next)} />
+      </div>
+
+      <div className="vm-card-history">
+        <div><span>Last action</span><strong>{meta.lastAction || 'None'}</strong></div>
+        <div><span>Reason</span><strong>{meta.lastReason || '—'}</strong></div>
+        <div><span>Restarts</span><strong>{meta.restartCount ?? 0}</strong></div>
+        <div><span>Recreates</span><strong>{meta.recreateCount ?? 0}</strong></div>
       </div>
 
       <div className="vm-card-actions">
@@ -128,7 +136,7 @@ export default function VMManager(){
   const [busyAction, setBusyAction] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState({})
-  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, recommendations:[], vmStates:[], cfg:{} })
+  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, recommendations:[], vmStates:[], cfg:{}, history:{ events:[], vms:{} } })
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
   const didLoadOnceRef = useRef(false)
@@ -359,7 +367,9 @@ export default function VMManager(){
   }, [instances])
 
   const protectedCount = useMemo(()=>instances.filter(vm => vm._optimizer?.protected).length, [instances])
+  const unstableCount = useMemo(()=>instances.filter(vm => vm._optimizer?.unstable).length, [instances])
   const hostPressure = optimizer.hostPressure || { level:'healthy', reasons:[] }
+  const recentEvents = (optimizer.history && optimizer.history.events ? optimizer.history.events : []).slice(-8).reverse()
 
   return (
     <div>
@@ -407,6 +417,8 @@ export default function VMManager(){
             <div><strong>{optimizer.cfg?.blockStartsOnPressure ? 'On' : 'Off'}</strong><span>Block starts on pressure</span></div>
             <div><strong>{optimizer.cfg?.activityWindowSeconds || 0}s</strong><span>Active window</span></div>
             <div><strong>{protectedCount}</strong><span>Protected VMs</span></div>
+            <div><strong>{unstableCount}</strong><span>Unstable VMs</span></div>
+            <div><strong>{recentEvents.length}</strong><span>Recent events shown</span></div>
           </div>
           <div className="optimizer-policy-actions">
             <Button onClick={()=>setSettingsOpen(true)}>Tune policy</Button>
@@ -423,6 +435,18 @@ export default function VMManager(){
                 <span>{rec.detail}</span>
               </div>
             ))}
+          </div>
+        </div>
+
+        <div className="glass-card optimizer-card optimizer-card-wide">
+          <div className="optimizer-card-label">Recent optimizer actions</div>
+          <div className="optimizer-event-list">
+            {recentEvents.length ? recentEvents.map((ev, idx)=>(
+              <div key={idx} className="optimizer-event-item">
+                <strong>{ev.vm || ev.name || ev.container || 'host'}</strong>
+                <span>{ev.action || ev.reason || 'event'}{ev.reason ? ` · ${ev.reason}` : ''}</span>
+              </div>
+            )) : <div className="optimizer-event-empty">No recent optimizer actions recorded yet.</div>}
           </div>
         </div>
       </div>

@@ -2949,6 +2949,7 @@ def api_optimizer_v2_summary():
             'vmStates': stats.get('vmStates') or [],
             'recommendations': stats.get('recommendations') or [],
             'profiles': stats.get('profiles') or {},
+            'history': stats.get('history') or {},
             'cfg': s.get('cfg') or {},
             'lastRun': s.get('lastRun') or {},
         })

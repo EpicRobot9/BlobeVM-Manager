@@ -26,6 +26,7 @@ LAST_RUN_PATH = os.path.join(STATE_DIR, '.optimizer_last_run.json')
 ACTION_META_DIR = os.path.join(STATE_DIR, '.optimizer_actions')
 ACTIVITY_META_DIR = os.path.join(STATE_DIR, '.optimizer_activity')
 PROFILE_META_PATH = os.path.join(STATE_DIR, '.optimizer_profiles.json')
+HISTORY_META_PATH = os.path.join(STATE_DIR, '.optimizer_history.json')
 
 DEFAULT_CFG = {
     'enabled': True,
@@ -170,6 +171,57 @@ def _activity_payload(name: str):
     if not isinstance(data, dict):
         data = {}
     return data
+
+
+def _history_state():
+    data = _read_json_file(HISTORY_META_PATH, {'events': [], 'vms': {}})
+    if not isinstance(data, dict):
+        data = {'events': [], 'vms': {}}
+    data.setdefault('events', [])
+    data.setdefault('vms', {})
+    return data
+
+
+def _save_history_state(data):
+    if not isinstance(data, dict):
+        return False
+    data.setdefault('events', [])
+    data.setdefault('vms', {})
+    data['events'] = list(data.get('events') or [])[-120:]
+    return _write_json_file(HISTORY_META_PATH, data)
+
+
+def _record_history_event(event: dict):
+    try:
+        if not isinstance(event, dict):
+            return
+        data = _history_state()
+        ev = dict(event)
+        ev.setdefault('ts', int(time.time()))
+        vm_name = ev.get('name') or ev.get('vm')
+        if not vm_name and ev.get('container', '').startswith('blobevm_'):
+            vm_name = ev['container'][len('blobevm_'):]
+        if vm_name:
+            ev['vm'] = vm_name
+            rec = data['vms'].get(vm_name, {}) if isinstance(data.get('vms'), dict) else {}
+            rec.setdefault('history', [])
+            rec['lastAction'] = ev.get('action') or ev.get('reason') or 'event'
+            rec['lastEventTs'] = ev['ts']
+            rec['lastReason'] = ev.get('reason') or ''
+            if ev.get('action') in ('restart', 'restart_container'):
+                rec['restartCount'] = int(rec.get('restartCount') or 0) + 1
+            if ev.get('action') == 'recreate':
+                rec['recreateCount'] = int(rec.get('recreateCount') or 0) + 1
+            if ev.get('action') == 'warn':
+                rec['warnCount'] = int(rec.get('warnCount') or 0) + 1
+            rec['history'] = (list(rec.get('history') or []) + [ev])[-20:]
+            recent_bad = [x for x in rec['history'] if x.get('action') in ('restart', 'restart_container', 'recreate') and (ev['ts'] - int(x.get('ts') or ev['ts'])) <= 1800]
+            rec['unstable'] = len(recent_bad) >= 3
+            data['vms'][vm_name] = rec
+        data['events'] = (list(data.get('events') or []) + [ev])[-120:]
+        _save_history_state(data)
+    except Exception as e:
+        log(f'failed recording history event: {e}')
 
 
 def _derive_host_pressure(stats: dict, cfg: dict):
@@ -584,6 +636,7 @@ def _run_health_guard(cfg, vm_state_map=None, host_pressure=None):
 
 def _derive_vm_states(cfg: dict, stats: dict):
     profiles = load_profiles()
+    history = _history_state().get('vms', {})
     by_name = {}
     for c in stats.get('containers') or []:
         name = str(c.get('name') or '')
@@ -614,6 +667,7 @@ def _derive_vm_states(cfg: dict, stats: dict):
             pressure = 'high'
         elif cpu >= 60 or mem >= 75:
             pressure = 'medium'
+        hist = history.get(name, {}) if isinstance(history, dict) else {}
         state = {
             'name': name,
             'profile': profile,
@@ -625,6 +679,13 @@ def _derive_vm_states(cfg: dict, stats: dict):
             'memPercent': round(mem, 2),
             'pressure': pressure,
             'running': bool(c),
+            'unstable': bool(hist.get('unstable')),
+            'lastAction': hist.get('lastAction'),
+            'lastReason': hist.get('lastReason'),
+            'lastEventTs': hist.get('lastEventTs'),
+            'restartCount': int(hist.get('restartCount') or 0),
+            'recreateCount': int(hist.get('recreateCount') or 0),
+            'warnCount': int(hist.get('warnCount') or 0),
         }
         states.append(state)
     return states
@@ -701,6 +762,13 @@ def _build_recommendations(cfg: dict, stats: dict, vm_states, host_pressure):
             'title': 'Protected active VMs are consuming heavy resources',
             'detail': 'Consider increasing host headroom or lowering VM density for: ' + ', '.join(v['name'] for v in protected_hot[:4])
         })
+    unstable = [v['name'] for v in vm_states if v.get('unstable')]
+    if unstable:
+        recs.append({
+            'level': 'warn',
+            'title': 'Some VMs look unstable',
+            'detail': 'Repeated optimizer interventions detected for: ' + ', '.join(unstable[:5])
+        })
     unknown_profiles = [v['name'] for v in vm_states if v.get('profile') == 'desktop']
     if unknown_profiles:
         recs.append({
@@ -747,12 +815,17 @@ def run_once():
                 enforce_strict_memory(cfg)
             except Exception as e:
                 log(f'error enforcing strictMemoryLimit: {e}')
+        for ev in events:
+            _record_history_event(ev)
         post_stats = gather_stats()
+        post_host_pressure = _derive_host_pressure(post_stats, cfg)
+        post_vm_states = _derive_vm_states(cfg, post_stats)
         payload_stats = {
             'raw': post_stats,
-            'hostPressure': _derive_host_pressure(post_stats, cfg),
-            'vmStates': _derive_vm_states(cfg, post_stats),
-            'recommendations': _build_recommendations(cfg, post_stats, _derive_vm_states(cfg, post_stats), _derive_host_pressure(post_stats, cfg)),
+            'hostPressure': post_host_pressure,
+            'vmStates': post_vm_states,
+            'recommendations': _build_recommendations(cfg, post_stats, post_vm_states, post_host_pressure),
+            'history': _history_state(),
         }
     except Exception as e:
         log(f'error in run_once: {e}')
@@ -804,6 +877,7 @@ def status():
         'vmStates': vm_states,
         'recommendations': _build_recommendations(cfg, raw_stats, vm_states, host_pressure),
         'profiles': load_profiles(),
+        'history': _history_state(),
     }
     last = 0
     last_run = {}
