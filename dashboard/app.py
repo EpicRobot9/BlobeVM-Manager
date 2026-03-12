@@ -1050,6 +1050,33 @@ def _vm_host_port(cname: str) -> str:
         pass
     return ''
 
+def _vm_path_prefix(name: str) -> str:
+    base_path = _read_env().get('BASE_PATH', '/vm') or '/vm'
+    if not base_path.startswith('/'):
+        base_path = '/' + base_path
+    base_path = base_path.rstrip('/')
+    inst_dir = os.path.join(_state_dir(), 'instances', name)
+    override = ''
+    try:
+        meta = os.path.join(inst_dir, '.meta.json')
+        if os.path.isfile(meta):
+            data = json.load(open(meta, 'r'))
+            override = (data.get('path_override') or '').strip()
+    except Exception:
+        override = ''
+    prefix = override or f'{base_path}/{name}'
+    if not prefix.startswith('/'):
+        prefix = '/' + prefix
+    return prefix.rstrip('/')
+
+
+def _build_vm_embed_url(name: str) -> str:
+    if _is_direct_mode():
+        return _build_vm_url(name)
+    prefix = _vm_path_prefix(name)
+    return f"{prefix}/vnc/index.html?autoconnect=1&resize=remote&clipboard_up=true&clipboard_down=true&clipboard_seamless=true&show_control_bar=true&path={prefix}/websockify"
+
+
 def _build_vm_url(name: str) -> str:
     """Best-effort VM URL appropriate for the current mode, for browser-origin host.
     In direct mode, combine request host with published port. In merged mode, use manager url.
@@ -1709,7 +1736,7 @@ def dashboard_vm_wrapper(name):
         # Public wrapper page that opens the VM inside an iframe while setting the tab title and favicon.
         # We render a small client-side React app that will show either the iframe (when VM is running)
         # or a full-screen fallback UI when the VM is stopped/unreachable.
-        url = _build_vm_url(name) or ''
+        url = _build_vm_embed_url(name) or ''
         cfg = _load_dashboard_settings()
         vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
         title = vm_titles.get(name) or f"EpicVM - {name}"
