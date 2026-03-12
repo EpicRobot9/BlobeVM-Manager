@@ -756,14 +756,52 @@ def _is_vm_protected(vm_state):
     return bool(vm_state.get('protected')) or vm_state.get('profile') in ('interactive', 'gaming')
 
 
+def _relief_candidates(vm_states):
+    ranked = []
+    for v in (vm_states or []):
+        if not v.get('running'):
+            continue
+        if v.get('activityClass') != 'idle':
+            continue
+        if v.get('profile') not in ('background', 'disposable', 'light', 'desktop'):
+            continue
+        score = 0
+        reasons = []
+        profile = v.get('profile')
+        if profile in ('background', 'disposable'):
+            score += 5; reasons.append('low priority profile')
+        elif profile == 'light':
+            score += 4; reasons.append('light profile')
+        else:
+            score += 2; reasons.append('idle desktop candidate')
+        mem = float(v.get('memPercent') or 0)
+        cpu = float(v.get('cpuPercent') or 0)
+        score += min(5, int(mem / 20))
+        score += min(4, int(cpu / 25))
+        if mem >= 60:
+            reasons.append(f'high memory ({mem:.0f}%)')
+        if cpu >= 30:
+            reasons.append(f'non-trivial cpu ({cpu:.0f}%)')
+        if v.get('unstable'):
+            score += 2; reasons.append('already unstable')
+        ranked.append({
+            'name': v.get('name'),
+            'profile': profile,
+            'activityClass': v.get('activityClass'),
+            'cpuPercent': round(cpu, 2),
+            'memPercent': round(mem, 2),
+            'recoveryState': v.get('recoveryState'),
+            'score': score,
+            'reasons': reasons,
+        })
+    ranked.sort(key=lambda x: (-int(x.get('score') or 0), -float(x.get('memPercent') or 0), -float(x.get('cpuPercent') or 0), x.get('name') or ''))
+    return ranked
+
+
 def _stop_idle_pressure_vm(cfg: dict, vm_states, host_pressure):
     if host_pressure.get('level') not in ('pressured', 'critical'):
         return None
-    candidates = [
-        v for v in (vm_states or [])
-        if v.get('running') and v.get('activityClass') == 'idle' and v.get('profile') in ('background', 'disposable', 'light')
-    ]
-    candidates.sort(key=lambda v: (0 if v.get('profile') in ('background', 'disposable') else 1, -float(v.get('memPercent') or 0), -float(v.get('cpuPercent') or 0)))
+    candidates = _relief_candidates(vm_states)
     for vm in candidates:
         name = vm.get('name')
         cooldown = int(cfg.get('guardCooldownSeconds', 300))
@@ -772,7 +810,7 @@ def _stop_idle_pressure_vm(cfg: dict, vm_states, host_pressure):
         try:
             subprocess.check_call(['docker', 'stop', f'blobevm_{name}'])
             log(f'stopped idle VM {name} due to host pressure {host_pressure.get("level")}')
-            return {'action': 'stop', 'reason': 'pressure-relief', 'container': f'blobevm_{name}', 'name': name, 'pressureLevel': host_pressure.get('level')}
+            return {'action': 'stop', 'reason': 'pressure-relief', 'container': f'blobevm_{name}', 'name': name, 'pressureLevel': host_pressure.get('level'), 'candidateScore': vm.get('score'), 'candidateReasons': vm.get('reasons')}
         except Exception as e:
             log(f'failed stopping idle VM {name} for pressure relief: {e}')
     return None
@@ -950,6 +988,7 @@ def run_once():
             'hostPressure': post_host_pressure,
             'vmStates': post_vm_states,
             'capacity': post_capacity,
+            'reliefCandidates': _relief_candidates(post_vm_states),
             'recommendations': _build_recommendations(cfg, post_stats, post_vm_states, post_host_pressure),
             'history': _history_state(),
             'trends': _trend_state(),
@@ -1003,6 +1042,7 @@ def status():
         'hostPressure': host_pressure,
         'vmStates': vm_states,
         'capacity': _estimate_capacity(cfg, raw_stats, vm_states, host_pressure),
+        'reliefCandidates': _relief_candidates(vm_states),
         'recommendations': _build_recommendations(cfg, raw_stats, vm_states, host_pressure),
         'profiles': load_profiles(),
         'history': _history_state(),

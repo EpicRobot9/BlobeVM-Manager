@@ -2970,6 +2970,7 @@ def api_optimizer_v2_summary():
             'ok': True,
             'hostPressure': stats.get('hostPressure') or {},
             'capacity': stats.get('capacity') or {},
+            'reliefCandidates': stats.get('reliefCandidates') or [],
             'vmStates': stats.get('vmStates') or [],
             'recommendations': stats.get('recommendations') or [],
             'profiles': stats.get('profiles') or {},

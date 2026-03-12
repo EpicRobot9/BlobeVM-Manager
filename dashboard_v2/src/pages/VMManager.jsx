@@ -147,7 +147,7 @@ export default function VMManager(){
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [detailOpen, setDetailOpen] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState({})
-  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, capacity:{}, recommendations:[], vmStates:[], cfg:{}, history:{ events:[], vms:{} }, trends:{ points:[] } })
+  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, capacity:{}, reliefCandidates:[], recommendations:[], vmStates:[], cfg:{}, history:{ events:[], vms:{} }, trends:{ points:[] } })
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
   const didLoadOnceRef = useRef(false)
@@ -399,6 +399,7 @@ export default function VMManager(){
   const hostPressure = optimizer.hostPressure || { level:'healthy', reasons:[] }
   const capacity = optimizer.capacity || {}
   const trendPoints = (optimizer.trends && optimizer.trends.points ? optimizer.trends.points : []).slice(-24)
+  const reliefCandidates = (optimizer.reliefCandidates || []).slice(0, 6)
   const recentEvents = (optimizer.history && optimizer.history.events ? optimizer.history.events : []).slice(-8).reverse()
   const unstableVms = instances.filter(vm => vm._optimizer?.unstable)
   const degradedVms = instances.filter(vm => {
@@ -514,6 +515,19 @@ export default function VMManager(){
             <span>{trendPoints.length} points</span>
           </div>
         </div>
+
+        <div className="glass-card optimizer-card optimizer-card-wide">
+          <div className="optimizer-card-label">Relief candidates</div>
+          <div className="optimizer-event-list">
+            {reliefCandidates.length ? reliefCandidates.map((cand, idx)=>(
+              <div key={idx} className="optimizer-event-item">
+                <strong>{cand.name} <span className="inline-dim">({cand.profile})</span></strong>
+                <span>score {cand.score} · CPU {Math.round(cand.cpuPercent || 0)}% · RAM {Math.round(cand.memPercent || 0)}%</span>
+                <span>{(cand.reasons || []).join(' · ')}</span>
+              </div>
+            )) : <div className="optimizer-event-empty">No idle low-priority relief candidates right now.</div>}
+          </div>
+        </div>
       </div>
 
       <div className="glass-card" style={{marginTop:16}}>
@@ -561,6 +575,12 @@ export default function VMManager(){
             <div className="optimizer-card-label">Trend snapshots</div>
             <div className="detail-list">
               {trendPoints.length ? [...trendPoints].reverse().slice(0, 12).map((pt, idx)=><div key={idx} className="detail-item"><strong>{new Date((pt.ts || 0) * 1000).toLocaleTimeString()}</strong><span>{pt.pressureLevel || 'healthy'} · CPU {Math.round(pt.vmCpuTotal || 0)}% · RAM {pt.availableMemoryMb || 0}MB · swap {pt.swapPercent || 0}% · gaming {pt.gamingSuitability || 'good'}</span></div>) : <div className="optimizer-event-empty">No trend snapshots recorded yet.</div>}
+            </div>
+          </div>
+          <div className="glass-subcard detail-span-2">
+            <div className="optimizer-card-label">Pressure relief ranking</div>
+            <div className="detail-list">
+              {reliefCandidates.length ? reliefCandidates.map((cand, idx)=><div key={idx} className="detail-item"><strong>#{idx + 1} · {cand.name}</strong><span>{cand.profile} · score {cand.score} · {(cand.reasons || []).join(' · ')}</span></div>) : <div className="optimizer-event-empty">No ranked relief candidates right now.</div>}
             </div>
           </div>
         </div>

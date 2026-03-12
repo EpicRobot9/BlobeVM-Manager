@@ -150,6 +150,7 @@ table tbody tr:hover{background:rgba(255,255,255,0.02);transform:translateY(-2px
 .detail-item{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border-radius:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05)}
 .detail-item strong{font-size:14px}
 .detail-item span{font-size:13px;color:var(--muted)}
+.inline-dim{font-weight:400;color:var(--muted)}
 .optimizer-rec strong{font-size:14px}
 .optimizer-rec span{font-size:13px;color:var(--muted)}
 .optimizer-rec.rec-warn{border-color:rgba(245,158,11,0.28)}
