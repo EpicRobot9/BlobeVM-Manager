@@ -5,22 +5,11 @@ import Modal from '../components/Modal'
 import VmExec from '../components/VmExec'
 import { useToasts } from '../components/ToastProvider'
 
-const PROFILE_OPTIONS = ['light', 'desktop', 'interactive', 'gaming', 'background', 'disposable']
-
 function toneFor(status){
   const s = (status || '').toLowerCase()
   if(s.includes('up') || s.includes('running') || s.includes('healthy')) return 'live'
   if(s.includes('rebuild') || s.includes('update')) return 'busy'
   return 'down'
-}
-
-function pressureTone(level){
-  switch((level || '').toLowerCase()){
-    case 'critical': return 'danger'
-    case 'pressured': return 'warn'
-    case 'warm': return 'warm'
-    default: return 'ok'
-  }
 }
 
 function StatusBadge({ status }){
@@ -54,44 +43,8 @@ function StatMeter({ label, value, tone='cpu' }){
   )
 }
 
-function ProfileSelect({ value, disabled, onChange }){
-  return (
-    <select className="vm-profile-select" value={value || 'desktop'} disabled={disabled} onChange={e=>onChange(e.target.value)}>
-      {PROFILE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-    </select>
-  )
-}
-
-function SettingField({ label, value, onChange, type='number', min, step }){
-  return (
-    <label className="optimizer-setting-field">
-      <span>{label}</span>
-      <input type={type} value={value} min={min} step={step} onChange={onChange} />
-    </label>
-  )
-}
-
-function recoveryTone(state){
-  const s = String(state || '').toLowerCase()
-  if(s.includes('restart-loop')) return 'danger'
-  if(s.includes('protected-')) return 'protected'
-  if(s.includes('recover') || s.includes('restart') || s.includes('degraded')) return 'warn'
-  if(s === 'stopped') return 'muted'
-  return 'ok'
-}
-
-function recommendedActionTone(action){
-  const s = String(action || '').toLowerCase()
-  if(s.includes('escalate')) return 'danger'
-  if(s.includes('stop')) return 'warn'
-  if(s.includes('recover') || s.includes('wait')) return 'info'
-  if(s.includes('preserve')) return 'protected'
-  return 'ok'
-}
-
-function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshing }){
+function VmCard({ vm, onAction, onDetails, busyAction, refreshing }){
   const tone = toneFor(vm.status)
-  const meta = vm._optimizer || {}
   return (
     <div className={`vm-card vm-card-${tone}`}>
       <div className="vm-card-refresh" aria-hidden="true">
@@ -107,38 +60,14 @@ function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshi
       </div>
 
       <div className="vm-card-stats">
-        <StatMeter label="CPU" value={vm._stats?.cpu_percent ?? meta.cpuPercent ?? 0} tone="cpu" />
-        <StatMeter label="RAM" value={vm._stats?.mem_percent ?? meta.memPercent ?? 0} tone="ram" />
+        <StatMeter label="CPU" value={vm._stats?.cpu_percent ?? 0} tone="cpu" />
+        <StatMeter label="RAM" value={vm._stats?.mem_percent ?? 0} tone="ram" />
       </div>
 
       <div className="vm-card-meta">
         <div className="vm-meta-chip">Port: {vm.port || '—'}</div>
-        <div className="vm-meta-chip">Activity: {meta.activityClass || 'unknown'}</div>
-        <div className="vm-meta-chip">Pressure: {meta.pressure || 'low'}</div>
-        <div className="vm-meta-chip">Profile: {meta.profile || 'desktop'}</div>
-        <div className={`vm-meta-chip recovery ${recoveryTone(meta.recoveryState)}`}>Recovery: {meta.recoveryState || 'healthy'}</div>
-        {meta.protected && <div className="vm-meta-chip protected">Protected</div>}
-        {meta.unstable && <div className="vm-meta-chip unstable">Unstable</div>}
+        <div className="vm-meta-chip">Name: {vm.name}</div>
       </div>
-
-      <div className="vm-card-profile-row">
-        <span className="vm-profile-label">Profile</span>
-        <ProfileSelect value={meta.profile || 'desktop'} disabled={busyAction} onChange={(next)=>onProfileChange(vm.name, next)} />
-      </div>
-
-      <div className="vm-card-history">
-        <div><span>Last action</span><strong>{meta.lastAction || 'None'}</strong></div>
-        <div><span>Reason</span><strong>{meta.lastReason || '—'}</strong></div>
-        <div><span>Restarts</span><strong>{meta.restartCount ?? 0}</strong></div>
-        <div><span>Recreates</span><strong>{meta.recreateCount ?? 0}</strong></div>
-      </div>
-
-      {meta.recommendedAction && (
-        <div className={`vm-recommendation tone-${recommendedActionTone(meta.recommendedAction.action)}`}>
-          <strong>{meta.recommendedAction.label || 'Recommended action'}</strong>
-          <span>{meta.recommendedAction.detail || 'No detail available.'}</span>
-        </div>
-      )}
 
       <div className="vm-card-actions">
         <Button disabled={busyAction} onClick={()=>onAction('start', vm.name)}>Start</Button>
@@ -156,15 +85,11 @@ export default function VMManager(){
   const [initialLoading, setInitialLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [selected, setSelected] = useState(null)
-  const [selectedVmMeta, setSelectedVmMeta] = useState(null)
   const [logs, setLogs] = useState('')
   const [logLoading, setLogLoading] = useState(false)
   const [announcement, setAnnouncement] = useState('')
   const [busyAction, setBusyAction] = useState('')
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [detailOpen, setDetailOpen] = useState(false)
-  const [settingsDraft, setSettingsDraft] = useState({})
-  const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, capacity:{}, reliefCandidates:[], recommendations:[], vmStates:[], cfg:{}, history:{ events:[], vms:{} }, trends:{ points:[] } })
+  const [optimizer, setOptimizer] = useState({ capacity:{}, vmStates:[] })
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
   const didLoadOnceRef = useRef(false)
@@ -229,18 +154,7 @@ export default function VMManager(){
 
       prevStatsRef.current = statsMap || {}
       setInstances(insts)
-      if(optJ && optJ.ok){
-        setOptimizer(optJ)
-        setSettingsDraft({
-          hostCpuSoftLimit: optJ.cfg?.hostCpuSoftLimit ?? 75,
-          hostCpuHardLimit: optJ.cfg?.hostCpuHardLimit ?? 90,
-          minAvailableMemoryMb: optJ.cfg?.minAvailableMemoryMb ?? 2048,
-          maxSwapPercent: optJ.cfg?.maxSwapPercent ?? 10,
-          activityWindowSeconds: optJ.cfg?.activityWindowSeconds ?? 300,
-          protectActiveVms: !!optJ.cfg?.protectActiveVms,
-          blockStartsOnPressure: !!optJ.cfg?.blockStartsOnPressure,
-        })
-      }
+      if(optJ && optJ.ok) setOptimizer(optJ)
       didLoadOnceRef.current = true
     }catch(e){
       console.error('load instances', e)
@@ -300,88 +214,8 @@ export default function VMManager(){
     setTimeout(()=>load({ silent:true }), 800)
   }
 
-  async function setProfile(name, profile){
-    const key = `profile:${name}`
-    setBusyAction(key)
-    try{
-      const current = instances.find(v => v.name === name)?._optimizer || {}
-      if(profile === 'gaming' || profile === 'interactive'){
-        const slots = profile === 'gaming' ? Number(optimizer.capacity?.estimatedAdditionalGamingSlots ?? 0) : Number(optimizer.capacity?.estimatedAdditionalInteractiveSlots ?? 0)
-        const suitability = String(optimizer.capacity?.gamingSuitability || 'good')
-        const already = current.profile === profile
-        if(!already && (slots <= 0 || suitability === 'poor' || suitability === 'tight')){
-          const msg = profile === 'gaming'
-            ? `Host capacity looks ${suitability}. Estimated additional gaming slots: ${slots}. Promote ${name} to gaming anyway?`
-            : `Interactive capacity looks tight. Estimated additional interactive slots: ${slots}. Promote ${name} anyway?`
-          const proceed = window.confirm(msg)
-          if(!proceed){
-            setBusyAction('')
-            return
-          }
-        }
-      }
-      const res = await apiFetch(`/optimizer/profile/${encodeURIComponent(name)}`, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ profile })
-      })
-      const body = await res.json().catch(()=>({ ok:res.ok }))
-      if(!res.ok || body.ok === false) throw new Error(body.error || 'Failed to update profile')
-      addToast({ title:`${name}`, message:`Profile set to ${body.profile || profile}`, type:'success', timeout:5000 })
-      await load({ silent:true })
-    }catch(e){
-      addToast({ title:`${name}`, message:String(e), type:'error', timeout:8000 })
-    }
-    setBusyAction('')
-  }
-
-  async function optimizerSet(key, val){
-    const opKey = `setting:${key}`
-    setBusyAction(opKey)
-    try{
-      const res = await apiFetch('/optimizer/set', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ key, val })
-      })
-      const body = await res.json().catch(()=>({ ok:res.ok }))
-      if(!res.ok || body.ok === false) throw new Error(body.error || `Failed to set ${key}`)
-      addToast({ title:'Optimizer', message:`Updated ${key}`, type:'success', timeout:4000 })
-      await load({ silent:true })
-    }catch(e){
-      addToast({ title:'Optimizer', message:String(e), type:'error', timeout:8000 })
-    }
-    setBusyAction('')
-  }
-
-  async function saveOptimizerSettings(){
-    const entries = [
-      ['hostCpuSoftLimit', Number(settingsDraft.hostCpuSoftLimit || 75)],
-      ['hostCpuHardLimit', Number(settingsDraft.hostCpuHardLimit || 90)],
-      ['minAvailableMemoryMb', Number(settingsDraft.minAvailableMemoryMb || 2048)],
-      ['maxSwapPercent', Number(settingsDraft.maxSwapPercent || 10)],
-      ['activityWindowSeconds', Number(settingsDraft.activityWindowSeconds || 300)],
-      ['protectActiveVms', !!settingsDraft.protectActiveVms],
-      ['blockStartsOnPressure', !!settingsDraft.blockStartsOnPressure],
-    ]
-    for(const [key, val] of entries){
-      const res = await apiFetch('/optimizer/set', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ key, val })
-      })
-      const body = await res.json().catch(()=>({ ok:res.ok }))
-      if(!res.ok || body.ok === false) throw new Error(body.error || `Failed to set ${key}`)
-    }
-    addToast({ title:'Optimizer', message:'Settings saved', type:'success', timeout:5000 })
-    setSettingsOpen(false)
-    await load({ silent:true })
-  }
-
   async function openDetails(name){
     setSelected(name)
-    const vm = instances.find(v => v.name === name) || null
-    setSelectedVmMeta(vm)
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name)
   }
@@ -412,20 +246,6 @@ export default function VMManager(){
     return { total, live, down, busy }
   }, [instances])
 
-  const protectedCount = useMemo(()=>instances.filter(vm => vm._optimizer?.protected).length, [instances])
-  const unstableCount = useMemo(()=>instances.filter(vm => vm._optimizer?.unstable).length, [instances])
-  const recoveringCount = useMemo(()=>instances.filter(vm => String(vm._optimizer?.recoveryState || '').includes('recover') || String(vm._optimizer?.recoveryState || '').includes('restart') || String(vm._optimizer?.recoveryState || '').includes('degraded')).length, [instances])
-  const hostPressure = optimizer.hostPressure || { level:'healthy', reasons:[] }
-  const capacity = optimizer.capacity || {}
-  const trendPoints = (optimizer.trends && optimizer.trends.points ? optimizer.trends.points : []).slice(-24)
-  const reliefCandidates = (optimizer.reliefCandidates || []).slice(0, 6)
-  const recentEvents = (optimizer.history && optimizer.history.events ? optimizer.history.events : []).slice(-8).reverse()
-  const unstableVms = instances.filter(vm => vm._optimizer?.unstable)
-  const degradedVms = instances.filter(vm => {
-    const rs = String(vm._optimizer?.recoveryState || '')
-    return rs.includes('degraded') || rs.includes('recover') || rs.includes('restart')
-  })
-
   return (
     <div>
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
@@ -433,7 +253,7 @@ export default function VMManager(){
         <div>
           <div className="eyebrow">Dashboard v2</div>
           <h1 style={{margin:'8px 0 10px'}}>VM Control Center</h1>
-          <div style={{color:'var(--muted)', maxWidth:760}}>Modernized VM management, live load telemetry, and the first pass of optimizer-aware policy so the host stops acting like every loud VM is automatically broken.</div>
+          <div style={{color:'var(--muted)', maxWidth:760}}>Manage your VMs, inspect logs, and launch sessions cleanly. Optimizer policy, pressure, and recovery intelligence live in the dedicated Optimizer Control page now.</div>
         </div>
         <div style={{display:'flex', alignItems:'center', gap:14, flexWrap:'wrap'}}>
           {refreshing && (
@@ -451,107 +271,9 @@ export default function VMManager(){
         </div>
       </div>
 
-      <div className="optimizer-grid" style={{marginTop:16}}>
-        <div className="glass-card optimizer-card">
-          <div className="optimizer-card-label">Host pressure</div>
-          <div className={`optimizer-pressure pressure-${pressureTone(hostPressure.level)}`}>{hostPressure.level || 'healthy'}</div>
-          <div className="optimizer-pressure-stats">
-            <div><strong>{Math.round(hostPressure.vmCpuTotal || 0)}%</strong><span>VM CPU total</span></div>
-            <div><strong>{hostPressure.availableMemoryMb || 0} MB</strong><span>Available RAM</span></div>
-            <div><strong>{hostPressure.swapPercent || 0}%</strong><span>Swap</span></div>
-          </div>
-          <div className="optimizer-reason-list">
-            {(hostPressure.reasons || []).length ? hostPressure.reasons.map((reason, idx)=><div key={idx}>{reason}</div>) : <div>No host pressure warnings.</div>}
-          </div>
-        </div>
-
-        <div className="glass-card optimizer-card">
-          <div className="optimizer-card-label">Capacity forecast</div>
-          <div className={`optimizer-pressure pressure-${capacity.gamingSuitability === 'poor' ? 'danger' : capacity.gamingSuitability === 'tight' ? 'warn' : 'ok'}`}>{capacity.gamingSuitability || 'good'}</div>
-          <div className="optimizer-pressure-stats">
-            <div><strong>{capacity.estimatedAdditionalGamingSlots ?? 0}</strong><span>Extra gaming slots</span></div>
-            <div><strong>{capacity.estimatedAdditionalInteractiveSlots ?? 0}</strong><span>Extra interactive slots</span></div>
-            <div><strong>{Math.round(capacity.cpuHeadroomPercent ?? 0)}%</strong><span>CPU headroom</span></div>
-          </div>
-          <div className="optimizer-reason-list">
-            <div>Active VMs: {capacity.activeVmCount ?? 0}</div>
-            <div>Interactive/Gaming: {capacity.interactiveVmCount ?? 0} / {capacity.gamingVmCount ?? 0}</div>
-            <div>Free VM memory budget: {capacity.freeForVmsMb ?? 0} MB</div>
-          </div>
-        </div>
-
-        <div className="glass-card optimizer-card">
-          <div className="optimizer-card-label">Optimizer policy</div>
-          <div className="optimizer-policy-grid">
-            <div><strong>{optimizer.cfg?.protectActiveVms ? 'On' : 'Off'}</strong><span>Protect active VMs</span></div>
-            <div><strong>{optimizer.cfg?.blockStartsOnPressure ? 'On' : 'Off'}</strong><span>Block starts on pressure</span></div>
-            <div><strong>{optimizer.cfg?.activityWindowSeconds || 0}s</strong><span>Active window</span></div>
-            <div><strong>{protectedCount}</strong><span>Protected VMs</span></div>
-            <div><strong>{unstableCount}</strong><span>Unstable VMs</span></div>
-            <div><strong>{recoveringCount}</strong><span>Recovering/Degraded</span></div>
-            <div><strong>{recentEvents.length}</strong><span>Recent events shown</span></div>
-          </div>
-          <div className="optimizer-policy-actions">
-            <Button onClick={()=>setSettingsOpen(true)}>Tune policy</Button>
-            <Button onClick={()=>setDetailOpen(true)}>Open detail view</Button>
-            <Button onClick={()=>optimizerSet('protectActiveVms', !optimizer.cfg?.protectActiveVms)}>{optimizer.cfg?.protectActiveVms ? 'Disable' : 'Enable'} protection</Button>
-          </div>
-        </div>
-
-        <div className="glass-card optimizer-card optimizer-card-wide">
-          <div className="optimizer-card-label">Recommendations</div>
-          <div className="optimizer-recommendations">
-            {(optimizer.recommendations || []).map((rec, idx)=>(
-              <div key={idx} className={`optimizer-rec rec-${rec.level || 'info'}`}>
-                <strong>{rec.title}</strong>
-                <span>{rec.detail}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="glass-card optimizer-card optimizer-card-wide">
-          <div className="optimizer-card-label">Recent optimizer actions</div>
-          <div className="optimizer-event-list">
-            {recentEvents.length ? recentEvents.map((ev, idx)=>(
-              <div key={idx} className="optimizer-event-item">
-                <strong>{ev.vm || ev.name || ev.container || 'host'}</strong>
-                <span>{ev.action || ev.reason || 'event'}{ev.reason ? ` · ${ev.reason}` : ''}</span>
-              </div>
-            )) : <div className="optimizer-event-empty">No recent optimizer actions recorded yet.</div>}
-          </div>
-        </div>
-
-        <div className="glass-card optimizer-card optimizer-card-wide">
-          <div className="optimizer-card-label">Pressure trend</div>
-          <div className="optimizer-trend-grid">
-            {trendPoints.length ? trendPoints.map((pt, idx)=>(
-              <div key={idx} className={`trend-bar level-${pressureTone(pt.pressureLevel)}`} title={`cpu ${Math.round(pt.vmCpuTotal || 0)} · ram ${pt.availableMemoryMb || 0}MB · swap ${pt.swapPercent || 0}%`} style={{ height: `${Math.max(18, Math.min(100, Number(pt.vmCpuTotal || 0)))}px` }} />
-            )) : <div className="optimizer-event-empty">No trend points yet.</div>}
-          </div>
-          <div className="optimizer-trend-legend">
-            <span>Recent host pressure over time</span>
-            <span>{trendPoints.length} points</span>
-          </div>
-        </div>
-
-        <div className="glass-card optimizer-card optimizer-card-wide">
-          <div className="optimizer-card-label">Relief candidates</div>
-          <div className="optimizer-event-list">
-            {reliefCandidates.length ? reliefCandidates.map((cand, idx)=>(
-              <div key={idx} className="optimizer-event-item">
-                <strong>{cand.name} <span className="inline-dim">({cand.profile})</span></strong>
-                <span>score {cand.score} · CPU {Math.round(cand.cpuPercent || 0)}% · RAM {Math.round(cand.memPercent || 0)}%</span>
-                <span>{(cand.reasons || []).join(' · ')}</span>
-              </div>
-            )) : <div className="optimizer-event-empty">No idle low-priority relief candidates right now.</div>}
-          </div>
-        </div>
-      </div>
-
       <div className="glass-card" style={{marginTop:16}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12, flexWrap:'wrap'}}>
-          <div style={{color:'var(--muted)'}}>Manage your VMs, inspect logs, and start tagging them with real workload profiles so the optimizer can stop making baby-brain assumptions.</div>
+          <div style={{color:'var(--muted)'}}>VM Manager is now focused on VM operations only. Optimizer pressure, policy, recommendations, and recovery strategy have been moved to the dedicated Optimizer Control page.</div>
           <Button onClick={()=>load({ silent:true })}>Refresh</Button>
         </div>
 
@@ -564,64 +286,13 @@ export default function VMManager(){
             <div className="vm-empty-state">No VMs found. Wow. An empty fleet. Very intimidating.</div>
           ) : (
             <div className="vm-card-grid">
-              {instances.map(vm => <VmCard key={vm.name} vm={vm} onAction={action} onDetails={openDetails} onProfileChange={setProfile} busyAction={!!busyAction} refreshing={refreshing} />)}
+              {instances.map(vm => <VmCard key={vm.name} vm={vm} onAction={action} onDetails={openDetails} busyAction={!!busyAction} refreshing={refreshing} />)}
             </div>
           )}
         </div>
       </div>
 
-      <Modal open={detailOpen} title="Optimizer detail view" onClose={()=>setDetailOpen(false)} width={1100}>
-        <div className="optimizer-detail-grid">
-          <div className="glass-subcard">
-            <div className="optimizer-card-label">Unstable VMs</div>
-            <div className="detail-list">
-              {unstableVms.length ? unstableVms.map(vm => <div key={vm.name} className="detail-item"><strong>{vm.name}</strong><span>{vm._optimizer?.lastReason || 'Repeated interventions detected'}</span></div>) : <div className="optimizer-event-empty">No unstable VMs right now.</div>}
-            </div>
-          </div>
-          <div className="glass-subcard">
-            <div className="optimizer-card-label">Recovery states</div>
-            <div className="detail-list">
-              {degradedVms.length ? degradedVms.map(vm => <div key={vm.name} className="detail-item"><strong>{vm.name}</strong><span>{vm._optimizer?.recoveryState || 'unknown'}</span></div>) : <div className="optimizer-event-empty">No degraded or recovering VMs right now.</div>}
-            </div>
-          </div>
-          <div className="glass-subcard detail-span-2">
-            <div className="optimizer-card-label">Recent actions</div>
-            <div className="detail-list">
-              {recentEvents.length ? recentEvents.map((ev, idx)=><div key={idx} className="detail-item"><strong>{ev.vm || ev.name || ev.container || 'host'}</strong><span>{ev.action || 'event'}{ev.reason ? ` · ${ev.reason}` : ''}</span></div>) : <div className="optimizer-event-empty">No recent optimizer actions recorded yet.</div>}
-            </div>
-          </div>
-          <div className="glass-subcard detail-span-2">
-            <div className="optimizer-card-label">Trend snapshots</div>
-            <div className="detail-list">
-              {trendPoints.length ? [...trendPoints].reverse().slice(0, 12).map((pt, idx)=><div key={idx} className="detail-item"><strong>{new Date((pt.ts || 0) * 1000).toLocaleTimeString()}</strong><span>{pt.pressureLevel || 'healthy'} · CPU {Math.round(pt.vmCpuTotal || 0)}% · RAM {pt.availableMemoryMb || 0}MB · swap {pt.swapPercent || 0}% · gaming {pt.gamingSuitability || 'good'}</span></div>) : <div className="optimizer-event-empty">No trend snapshots recorded yet.</div>}
-            </div>
-          </div>
-          <div className="glass-subcard detail-span-2">
-            <div className="optimizer-card-label">Pressure relief ranking</div>
-            <div className="detail-list">
-              {reliefCandidates.length ? reliefCandidates.map((cand, idx)=><div key={idx} className="detail-item"><strong>#{idx + 1} · {cand.name}</strong><span>{cand.profile} · score {cand.score} · {(cand.reasons || []).join(' · ')}</span></div>) : <div className="optimizer-event-empty">No ranked relief candidates right now.</div>}
-            </div>
-          </div>
-        </div>
-      </Modal>
-
-      <Modal open={settingsOpen} title="Optimizer policy" onClose={()=>setSettingsOpen(false)} width={860}>
-        <div className="optimizer-settings-grid">
-          <SettingField label="Host CPU soft limit" value={settingsDraft.hostCpuSoftLimit ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, hostCpuSoftLimit: e.target.value }))} />
-          <SettingField label="Host CPU hard limit" value={settingsDraft.hostCpuHardLimit ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, hostCpuHardLimit: e.target.value }))} />
-          <SettingField label="Minimum available RAM (MB)" value={settingsDraft.minAvailableMemoryMb ?? ''} min={128} step={128} onChange={e=>setSettingsDraft(s => ({ ...s, minAvailableMemoryMb: e.target.value }))} />
-          <SettingField label="Max swap percent" value={settingsDraft.maxSwapPercent ?? ''} min={0} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, maxSwapPercent: e.target.value }))} />
-          <SettingField label="Activity window (seconds)" value={settingsDraft.activityWindowSeconds ?? ''} min={30} step={30} onChange={e=>setSettingsDraft(s => ({ ...s, activityWindowSeconds: e.target.value }))} />
-          <label className="optimizer-toggle-field"><input type="checkbox" checked={!!settingsDraft.protectActiveVms} onChange={e=>setSettingsDraft(s => ({ ...s, protectActiveVms: e.target.checked }))} /><span>Protect active VMs from disruptive recovery</span></label>
-          <label className="optimizer-toggle-field"><input type="checkbox" checked={!!settingsDraft.blockStartsOnPressure} onChange={e=>setSettingsDraft(s => ({ ...s, blockStartsOnPressure: e.target.checked }))} /><span>Block new starts under pressure</span></label>
-        </div>
-        <div className="optimizer-settings-actions">
-          <Button onClick={()=>setSettingsOpen(false)}>Cancel</Button>
-          <Button onClick={saveOptimizerSettings}>Save settings</Button>
-        </div>
-      </Modal>
-
-      <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>{ setSelected(null); setSelectedVmMeta(null) }} width={1180}>
+      <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>setSelected(null)} width={1180}>
         <div style={{display:'flex',gap:12, flexWrap:'wrap'}}>
           <div style={{flex:'1 1 620px'}}>
             <iframe title={`VM ${selected}`} src={`/dashboard/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:360,border:'1px solid rgba(255,255,255,0.04)', background:'#020617'}} />
@@ -630,18 +301,6 @@ export default function VMManager(){
             </div>
           </div>
           <div style={{width:420,maxWidth:'100%',display:'flex',flexDirection:'column',gap:8}}>
-            <div className="vm-detail-card">
-              <div className="vm-detail-heading">Optimizer summary</div>
-              <div className="vm-detail-list">
-                <div><span>Recovery</span><strong>{selectedVmMeta?._optimizer?.recoveryState || 'healthy'}</strong></div>
-                <div><span>Profile</span><strong>{selectedVmMeta?._optimizer?.profile || 'desktop'}</strong></div>
-                <div><span>Activity</span><strong>{selectedVmMeta?._optimizer?.activityClass || 'unknown'}</strong></div>
-                <div><span>Protected</span><strong>{selectedVmMeta?._optimizer?.protected ? 'Yes' : 'No'}</strong></div>
-                <div><span>Unstable</span><strong>{selectedVmMeta?._optimizer?.unstable ? 'Yes' : 'No'}</strong></div>
-                <div><span>Recommended</span><strong>{selectedVmMeta?._optimizer?.recommendedAction?.label || 'Observe'}</strong></div>
-              </div>
-              {selectedVmMeta?._optimizer?.recommendedAction?.detail && <div className="vm-detail-note">{selectedVmMeta._optimizer.recommendedAction.detail}</div>}
-            </div>
             <div style={{fontSize:13,color:'var(--muted)'}}>Console / Logs</div>
             <div style={{background:'#02040a',color:'#dff',padding:12,borderRadius:12,height:460,overflow:'auto',fontFamily:'monospace',fontSize:12,border:'1px solid rgba(255,255,255,0.04)'}}>
               {logLoading ? <div>Loading logs…</div> : <pre style={{whiteSpace:'pre-wrap',margin:0}}>{logs}</pre>}
