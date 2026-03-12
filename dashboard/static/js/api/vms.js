@@ -26,6 +26,12 @@
     return { ok: !!(res.ok && body && body.ok), status: res.status, body };
   };
 
+  window.api.optimizerSummary = async function(){
+    const res = await fetch('/dashboard/api/optimizer/v2/summary', { cache:'no-store' });
+    const body = await readJson(res);
+    return { ok: !!(res.ok && body && body.ok), status: res.status, body };
+  };
+
   window.api.escalateVM = async function(vmname, payload){
     const res = await fetch(`/dashboard/api/vm/${encodeURIComponent(vmname)}/escalate`, {
       method:'POST',

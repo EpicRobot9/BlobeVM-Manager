@@ -120,7 +120,10 @@
       setErrorMsg('');
       setDetails('');
       try{
-        const res = await window.api.recoverVM(vmname, { aggressive:true, reason });
+        const recovery = String((vm && vm.recoveryState) || '').toLowerCase();
+        const mode = recovery === 'restart-loop' ? 'aggressive' : (recovery.startsWith('protected-') ? 'cautious' : 'standard');
+        const aggressive = mode === 'aggressive';
+        const res = await window.api.recoverVM(vmname, { aggressive, mode, reason });
         const body = res.body || {};
         const attempts = Array.isArray(body.attempts) ? body.attempts : [];
         setDetails(attempts.map(a => `${a.action}: ${a.ok ? 'ok' : (a.stderr || 'failed')}`).join('\n'));

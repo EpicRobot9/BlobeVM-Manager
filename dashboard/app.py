@@ -1330,16 +1330,25 @@ def _tail_vm_logs(name: str, lines: int = 160) -> str:
         return str(e)
 
 
-def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True):
+def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode: str = 'standard'):
     attempts = []
     before = _vm_status_payload(name)
+    recovery_state = str(before.get('recoveryState') or '').lower()
+    protected_vm = bool(before.get('protectedVm'))
     if before.get('running') and not before.get('crashed'):
-        return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': before, 'message': 'VM already running'}
-    sequence = ['start']
-    if before.get('crashed') or aggressive:
-        sequence.append('restart')
-    if aggressive:
-        sequence.append('recreate')
+        return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': before, 'message': 'VM already running', 'mode': mode}
+    if mode == 'cautious' or protected_vm:
+        sequence = ['start']
+        if before.get('crashed'):
+            sequence.append('restart')
+    elif mode == 'aggressive' or recovery_state == 'restart-loop':
+        sequence = ['start', 'restart', 'recreate']
+    else:
+        sequence = ['start']
+        if before.get('crashed') or aggressive:
+            sequence.append('restart')
+        if aggressive:
+            sequence.append('recreate')
     for action in sequence:
         try:
             proc = subprocess.run([MANAGER, action, name], capture_output=True, text=True, timeout=90)
@@ -1356,9 +1365,9 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True):
         time.sleep(2.5)
         current = _vm_status_payload(name)
         if current.get('running') and (current.get('healthy') or current.get('state') == 'running'):
-            return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': current, 'message': f'VM recovered via {action}', 'source': source}
+            return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': current, 'message': f'VM recovered via {action}', 'source': source, 'mode': mode}
     final = _vm_status_payload(name)
-    return {'ok': False, 'recovered': False, 'attempts': attempts, 'status': final, 'message': 'VM recovery failed', 'source': source}
+    return {'ok': False, 'recovered': False, 'attempts': attempts, 'status': final, 'message': 'VM recovery failed', 'source': source, 'mode': mode}
 
 
 def _escalate_vm_to_openclaw(name: str, reason: str, extra=None):
@@ -2239,7 +2248,8 @@ def api_vm_recover(name):
     try:
         data = request.get_json(silent=True) or {}
         aggressive = bool(data.get('aggressive', True)) if isinstance(data, dict) else True
-        result = _recover_vm(name, source='dashboard', aggressive=aggressive)
+        mode = (data.get('mode') if isinstance(data, dict) else None) or 'standard'
+        result = _recover_vm(name, source='dashboard', aggressive=aggressive, mode=mode)
         return jsonify(result), (200 if result.get('ok') else 500)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500

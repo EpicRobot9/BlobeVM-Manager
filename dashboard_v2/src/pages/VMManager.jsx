@@ -286,6 +286,22 @@ export default function VMManager(){
     const key = `profile:${name}`
     setBusyAction(key)
     try{
+      const current = instances.find(v => v.name === name)?._optimizer || {}
+      if(profile === 'gaming' || profile === 'interactive'){
+        const slots = profile === 'gaming' ? Number(optimizer.capacity?.estimatedAdditionalGamingSlots ?? 0) : Number(optimizer.capacity?.estimatedAdditionalInteractiveSlots ?? 0)
+        const suitability = String(optimizer.capacity?.gamingSuitability || 'good')
+        const already = current.profile === profile
+        if(!already && (slots <= 0 || suitability === 'poor' || suitability === 'tight')){
+          const msg = profile === 'gaming'
+            ? `Host capacity looks ${suitability}. Estimated additional gaming slots: ${slots}. Promote ${name} to gaming anyway?`
+            : `Interactive capacity looks tight. Estimated additional interactive slots: ${slots}. Promote ${name} anyway?`
+          const proceed = window.confirm(msg)
+          if(!proceed){
+            setBusyAction('')
+            return
+          }
+        }
+      }
       const res = await apiFetch(`/optimizer/profile/${encodeURIComponent(name)}`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
