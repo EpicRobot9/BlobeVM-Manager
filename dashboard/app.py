@@ -1269,7 +1269,13 @@ def _vm_status_payload(name: str):
     restarting = bool(state.get('Restarting'))
     payload['oomKilled'] = oomkilled
     payload['restarting'] = restarting
-    payload['crashed'] = (not payload['running']) and ((payload['exitCode'] not in (None, 0)) or oomkilled or bool(payload['error']) or restarting or payload['status'] in ('exited', 'dead'))
+    payload['crashed'] = (not payload['running']) and (
+        (payload['exitCode'] not in (None, 0)) or
+        oomkilled or
+        bool(payload['error']) or
+        restarting or
+        payload['status'] == 'dead'
+    )
     return payload
 
 
