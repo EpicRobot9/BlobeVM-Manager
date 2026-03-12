@@ -62,6 +62,15 @@ function ProfileSelect({ value, disabled, onChange }){
   )
 }
 
+function SettingField({ label, value, onChange, type='number', min, step }){
+  return (
+    <label className="optimizer-setting-field">
+      <span>{label}</span>
+      <input type={type} value={value} min={min} step={step} onChange={onChange} />
+    </label>
+  )
+}
+
 function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshing }){
   const tone = toneFor(vm.status)
   const meta = vm._optimizer || {}
@@ -117,6 +126,8 @@ export default function VMManager(){
   const [logLoading, setLogLoading] = useState(false)
   const [announcement, setAnnouncement] = useState('')
   const [busyAction, setBusyAction] = useState('')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsDraft, setSettingsDraft] = useState({})
   const [optimizer, setOptimizer] = useState({ hostPressure:{ level:'healthy', reasons:[] }, recommendations:[], vmStates:[], cfg:{} })
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
@@ -182,7 +193,18 @@ export default function VMManager(){
 
       prevStatsRef.current = statsMap || {}
       setInstances(insts)
-      if(optJ && optJ.ok) setOptimizer(optJ)
+      if(optJ && optJ.ok){
+        setOptimizer(optJ)
+        setSettingsDraft({
+          hostCpuSoftLimit: optJ.cfg?.hostCpuSoftLimit ?? 75,
+          hostCpuHardLimit: optJ.cfg?.hostCpuHardLimit ?? 90,
+          minAvailableMemoryMb: optJ.cfg?.minAvailableMemoryMb ?? 2048,
+          maxSwapPercent: optJ.cfg?.maxSwapPercent ?? 10,
+          activityWindowSeconds: optJ.cfg?.activityWindowSeconds ?? 300,
+          protectActiveVms: !!optJ.cfg?.protectActiveVms,
+          blockStartsOnPressure: !!optJ.cfg?.blockStartsOnPressure,
+        })
+      }
       didLoadOnceRef.current = true
     }catch(e){
       console.error('load instances', e)
@@ -205,24 +227,35 @@ export default function VMManager(){
     return ()=>{ stopped = true }
   }, [])
 
-  async function action(cmd, name){
+  async function action(cmd, name, opts = {}){
     const key = `${cmd}:${name}`
+    const force = !!opts.force
     setBusyAction(key)
     try{
       if(cmd === 'start'){
-        await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'start-click' }) }).catch(()=>null)
-        const admRes = await apiFetch(`/optimizer/admission/${encodeURIComponent(name)}`).catch(()=>null)
+        await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source: force ? 'force-start-click' : 'start-click' }) }).catch(()=>null)
+        const admRes = await apiFetch(`/optimizer/admission/${encodeURIComponent(name)}${force ? '?force=1' : ''}`).catch(()=>null)
         const admBody = admRes && typeof admRes.json === 'function' ? await admRes.json().catch(()=>null) : null
-        if(admBody && admBody.admission && admBody.admission.ok === false){
+        if(admBody && admBody.admission && admBody.admission.ok === false && !force){
+          const proceed = window.confirm(`${admBody.admission.reason || 'Start blocked by optimizer admission control'}\n\nForce start anyway?`)
+          if(proceed){
+            setBusyAction('')
+            return action(cmd, name, { force:true })
+          }
           throw new Error(admBody.admission.reason || 'Start blocked by optimizer admission control')
         }
       }
-      const res = await apiFetch(`/${cmd}/${encodeURIComponent(name)}`, { method:'POST' })
+      const startBody = cmd === 'start' && force ? new URLSearchParams({ force:'1' }) : undefined
+      const res = await apiFetch(`/${cmd}/${encodeURIComponent(name)}`, {
+        method:'POST',
+        headers: startBody ? {'Content-Type':'application/x-www-form-urlencoded'} : undefined,
+        body: startBody
+      })
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false){
         throw new Error(body.error || body.message || `Failed to ${cmd} ${name}`)
       }
-      addToast({ title:`${name}`, message:`${cmd} request sent successfully`, type:'success', timeout:5000 })
+      addToast({ title:`${name}`, message:`${cmd} request sent successfully${force ? ' (forced)' : ''}`, type:'success', timeout:5000 })
     }catch(e){
       console.error('action error', e)
       addToast({ title:`${name}`, message:String(e), type:'error', timeout:8000 })
@@ -248,6 +281,49 @@ export default function VMManager(){
       addToast({ title:`${name}`, message:String(e), type:'error', timeout:8000 })
     }
     setBusyAction('')
+  }
+
+  async function optimizerSet(key, val){
+    const opKey = `setting:${key}`
+    setBusyAction(opKey)
+    try{
+      const res = await apiFetch('/optimizer/set', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ key, val })
+      })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false) throw new Error(body.error || `Failed to set ${key}`)
+      addToast({ title:'Optimizer', message:`Updated ${key}`, type:'success', timeout:4000 })
+      await load({ silent:true })
+    }catch(e){
+      addToast({ title:'Optimizer', message:String(e), type:'error', timeout:8000 })
+    }
+    setBusyAction('')
+  }
+
+  async function saveOptimizerSettings(){
+    const entries = [
+      ['hostCpuSoftLimit', Number(settingsDraft.hostCpuSoftLimit || 75)],
+      ['hostCpuHardLimit', Number(settingsDraft.hostCpuHardLimit || 90)],
+      ['minAvailableMemoryMb', Number(settingsDraft.minAvailableMemoryMb || 2048)],
+      ['maxSwapPercent', Number(settingsDraft.maxSwapPercent || 10)],
+      ['activityWindowSeconds', Number(settingsDraft.activityWindowSeconds || 300)],
+      ['protectActiveVms', !!settingsDraft.protectActiveVms],
+      ['blockStartsOnPressure', !!settingsDraft.blockStartsOnPressure],
+    ]
+    for(const [key, val] of entries){
+      const res = await apiFetch('/optimizer/set', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ key, val })
+      })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false) throw new Error(body.error || `Failed to set ${key}`)
+    }
+    addToast({ title:'Optimizer', message:'Settings saved', type:'success', timeout:5000 })
+    setSettingsOpen(false)
+    await load({ silent:true })
   }
 
   async function openDetails(name){
@@ -332,6 +408,10 @@ export default function VMManager(){
             <div><strong>{optimizer.cfg?.activityWindowSeconds || 0}s</strong><span>Active window</span></div>
             <div><strong>{protectedCount}</strong><span>Protected VMs</span></div>
           </div>
+          <div className="optimizer-policy-actions">
+            <Button onClick={()=>setSettingsOpen(true)}>Tune policy</Button>
+            <Button onClick={()=>optimizerSet('protectActiveVms', !optimizer.cfg?.protectActiveVms)}>{optimizer.cfg?.protectActiveVms ? 'Disable' : 'Enable'} protection</Button>
+          </div>
         </div>
 
         <div className="glass-card optimizer-card optimizer-card-wide">
@@ -367,6 +447,22 @@ export default function VMManager(){
           )}
         </div>
       </div>
+
+      <Modal open={settingsOpen} title="Optimizer policy" onClose={()=>setSettingsOpen(false)} width={860}>
+        <div className="optimizer-settings-grid">
+          <SettingField label="Host CPU soft limit" value={settingsDraft.hostCpuSoftLimit ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, hostCpuSoftLimit: e.target.value }))} />
+          <SettingField label="Host CPU hard limit" value={settingsDraft.hostCpuHardLimit ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, hostCpuHardLimit: e.target.value }))} />
+          <SettingField label="Minimum available RAM (MB)" value={settingsDraft.minAvailableMemoryMb ?? ''} min={128} step={128} onChange={e=>setSettingsDraft(s => ({ ...s, minAvailableMemoryMb: e.target.value }))} />
+          <SettingField label="Max swap percent" value={settingsDraft.maxSwapPercent ?? ''} min={0} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, maxSwapPercent: e.target.value }))} />
+          <SettingField label="Activity window (seconds)" value={settingsDraft.activityWindowSeconds ?? ''} min={30} step={30} onChange={e=>setSettingsDraft(s => ({ ...s, activityWindowSeconds: e.target.value }))} />
+          <label className="optimizer-toggle-field"><input type="checkbox" checked={!!settingsDraft.protectActiveVms} onChange={e=>setSettingsDraft(s => ({ ...s, protectActiveVms: e.target.checked }))} /><span>Protect active VMs from disruptive recovery</span></label>
+          <label className="optimizer-toggle-field"><input type="checkbox" checked={!!settingsDraft.blockStartsOnPressure} onChange={e=>setSettingsDraft(s => ({ ...s, blockStartsOnPressure: e.target.checked }))} /><span>Block new starts under pressure</span></label>
+        </div>
+        <div className="optimizer-settings-actions">
+          <Button onClick={()=>setSettingsOpen(false)}>Cancel</Button>
+          <Button onClick={saveOptimizerSettings}>Save settings</Button>
+        </div>
+      </Modal>
 
       <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>setSelected(null)} width={1180}>
         <div style={{display:'flex',gap:12, flexWrap:'wrap'}}>

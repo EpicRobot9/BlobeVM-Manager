@@ -112,8 +112,15 @@ table tbody tr:hover{background:rgba(255,255,255,0.02);transform:translateY(-2px
 .optimizer-pressure-stats span,.optimizer-policy-grid span{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
 .optimizer-reason-list{display:flex;flex-direction:column;gap:8px;color:#d9e8ff;font-size:13px}
 .optimizer-policy-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.optimizer-policy-actions{display:flex;gap:10px;flex-wrap:wrap}
 .optimizer-recommendations{display:flex;flex-direction:column;gap:10px}
 .optimizer-rec{display:flex;flex-direction:column;gap:6px;padding:12px 14px;border-radius:14px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04)}
+.optimizer-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.optimizer-setting-field{display:flex;flex-direction:column;gap:8px}
+.optimizer-setting-field span{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.optimizer-setting-field input{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:12px;color:#eef6ff}
+.optimizer-toggle-field{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.05)}
+.optimizer-settings-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}
 .optimizer-rec strong{font-size:14px}
 .optimizer-rec span{font-size:13px;color:var(--muted)}
 .optimizer-rec.rec-warn{border-color:rgba(245,158,11,0.28)}
@@ -135,7 +142,7 @@ table tbody tr:hover{background:rgba(255,255,255,0.02);transform:translateY(-2px
 .sidebar.mobile-open .glass-card{height:100%;border-radius:0}
 @media (max-width:900px){.vm-exec .cols{flex-direction:column}.vm-exec .history{width:100%}}
 @media (max-width: 640px){
-  .stat-grid,.vm-summary-grid,.optimizer-pressure-stats,.optimizer-policy-grid{grid-template-columns:1fr 1fr}
+  .stat-grid,.vm-summary-grid,.optimizer-pressure-stats,.optimizer-policy-grid,.optimizer-settings-grid{grid-template-columns:1fr 1fr}
   .stat-bar{width:100%}
   table{display:block;width:100%;overflow:auto}
   table thead{display:none}
@@ -145,6 +152,7 @@ table tbody tr:hover{background:rgba(255,255,255,0.02);transform:translateY(-2px
   .vm-card-stats{grid-template-columns:1fr}
   .vm-card-profile-row{flex-direction:column;align-items:stretch}
   .vm-profile-select{width:100%}
+  .optimizer-settings-grid{grid-template-columns:1fr}
 }
 
 .vm-refresh-banner{display:inline-flex;align-items:center;gap:10px;padding:10px 14px;border-radius:999px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);font-size:13px;color:#cfe0ff;box-shadow:0 8px 20px rgba(2,6,23,0.18)}
