@@ -29,6 +29,9 @@ RUN \
   rm /installapps.sh
 
 RUN \
+  # Fix Kasm path-mode websocket URL under subfolder routing:
+  # use an absolute subfolder path (/vm/<name>/websockify), not relative vm/<name>/websockify
+  perl -0777 -i -pe "s/PATH = '&path=' \+ SUBFOLDER\.substring\(1\) \+ 'websockify'/PATH = '&path=' + SUBFOLDER + 'websockify'/g" /kclient/index.js && \
   echo "**** cleanup ****" && \
   apt-get autoclean && \
   rm -rf \
