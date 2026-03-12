@@ -72,16 +72,21 @@ blobedash_build_hash() {
 ensure_blobedash_image() {
   local dockerfile="$STATE_DIR/server/blobedash.Dockerfile"
   [[ -f "$dockerfile" ]] || { echo "blobedash Dockerfile not found: $dockerfile" >&2; exit 1; }
-  local new_hash old_hash image_id
+  local new_hash old_hash image_id build_ctx
   new_hash="$(blobedash_build_hash)"
   old_hash="$(cat "$IMAGE_HASH_FILE" 2>/dev/null || true)"
   image_id="$(docker images -q "$IMAGE_NAME" 2>/dev/null | head -n1 || true)"
   if [[ -n "$image_id" && -n "$old_hash" && "$old_hash" == "$new_hash" ]]; then
     return 0
   fi
+  build_ctx="$(mktemp -d)"
+  trap 'rm -rf "$build_ctx"' RETURN
+  cp -f "$dockerfile" "$build_ctx/Dockerfile"
   echo "Building $IMAGE_NAME ..."
-  docker build -t "$IMAGE_NAME" -f "$dockerfile" "$STATE_DIR"
+  docker build -t "$IMAGE_NAME" "$build_ctx"
   printf "%s" "$new_hash" > "$IMAGE_HASH_FILE"
+  rm -rf "$build_ctx"
+  trap - RETURN
 }
 
 # Ensure dashboard app exists
