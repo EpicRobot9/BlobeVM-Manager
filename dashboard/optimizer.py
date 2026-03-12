@@ -670,6 +670,22 @@ def _derive_vm_states(cfg: dict, stats: dict):
         elif cpu >= 60 or mem >= 75:
             pressure = 'medium'
         hist = history.get(name, {}) if isinstance(history, dict) else {}
+        last_action = hist.get('lastAction')
+        last_reason = hist.get('lastReason')
+        unstable = bool(hist.get('unstable'))
+        recovery_state = 'healthy'
+        if not c:
+            recovery_state = 'stopped'
+        elif unstable:
+            recovery_state = 'restart-loop'
+        elif last_action in ('recreate',):
+            recovery_state = 'recovering'
+        elif last_action in ('restart', 'restart_container'):
+            recovery_state = 'restarting'
+        elif last_action == 'warn':
+            recovery_state = 'degraded'
+        if protected and recovery_state in ('degraded', 'restarting', 'recovering'):
+            recovery_state = 'protected-' + recovery_state
         state = {
             'name': name,
             'profile': profile,
@@ -681,9 +697,10 @@ def _derive_vm_states(cfg: dict, stats: dict):
             'memPercent': round(mem, 2),
             'pressure': pressure,
             'running': bool(c),
-            'unstable': bool(hist.get('unstable')),
-            'lastAction': hist.get('lastAction'),
-            'lastReason': hist.get('lastReason'),
+            'unstable': unstable,
+            'recoveryState': recovery_state,
+            'lastAction': last_action,
+            'lastReason': last_reason,
             'lastEventTs': hist.get('lastEventTs'),
             'restartCount': int(hist.get('restartCount') or 0),
             'recreateCount': int(hist.get('recreateCount') or 0),
@@ -824,6 +841,20 @@ def _build_recommendations(cfg: dict, stats: dict, vm_states, host_pressure):
             'level': 'warn',
             'title': 'Some VMs look unstable',
             'detail': 'Repeated optimizer interventions detected for: ' + ', '.join(unstable[:5])
+        })
+    recovering = [v['name'] for v in vm_states if str(v.get('recoveryState', '')).startswith('recover') or str(v.get('recoveryState', '')).startswith('restarting')]
+    if recovering:
+        recs.append({
+            'level': 'info',
+            'title': 'Some VMs are in recovery flow',
+            'detail': 'Currently recovering/restarting: ' + ', '.join(recovering[:5])
+        })
+    protected_degraded = [v['name'] for v in vm_states if str(v.get('recoveryState', '')).startswith('protected-')]
+    if protected_degraded:
+        recs.append({
+            'level': 'info',
+            'title': 'Protected VMs are degraded but being preserved',
+            'detail': 'Manual review may be better than forced recovery for: ' + ', '.join(protected_degraded[:5])
         })
     unknown_profiles = [v['name'] for v in vm_states if v.get('profile') == 'desktop']
     if unknown_profiles:

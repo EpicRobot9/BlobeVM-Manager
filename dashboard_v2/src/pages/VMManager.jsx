@@ -71,6 +71,15 @@ function SettingField({ label, value, onChange, type='number', min, step }){
   )
 }
 
+function recoveryTone(state){
+  const s = String(state || '').toLowerCase()
+  if(s.includes('restart-loop')) return 'danger'
+  if(s.includes('protected-')) return 'protected'
+  if(s.includes('recover') || s.includes('restart') || s.includes('degraded')) return 'warn'
+  if(s === 'stopped') return 'muted'
+  return 'ok'
+}
+
 function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshing }){
   const tone = toneFor(vm.status)
   const meta = vm._optimizer || {}
@@ -98,6 +107,7 @@ function VmCard({ vm, onAction, onDetails, onProfileChange, busyAction, refreshi
         <div className="vm-meta-chip">Activity: {meta.activityClass || 'unknown'}</div>
         <div className="vm-meta-chip">Pressure: {meta.pressure || 'low'}</div>
         <div className="vm-meta-chip">Profile: {meta.profile || 'desktop'}</div>
+        <div className={`vm-meta-chip recovery ${recoveryTone(meta.recoveryState)}`}>Recovery: {meta.recoveryState || 'healthy'}</div>
         {meta.protected && <div className="vm-meta-chip protected">Protected</div>}
         {meta.unstable && <div className="vm-meta-chip unstable">Unstable</div>}
       </div>
@@ -368,6 +378,7 @@ export default function VMManager(){
 
   const protectedCount = useMemo(()=>instances.filter(vm => vm._optimizer?.protected).length, [instances])
   const unstableCount = useMemo(()=>instances.filter(vm => vm._optimizer?.unstable).length, [instances])
+  const recoveringCount = useMemo(()=>instances.filter(vm => String(vm._optimizer?.recoveryState || '').includes('recover') || String(vm._optimizer?.recoveryState || '').includes('restart') || String(vm._optimizer?.recoveryState || '').includes('degraded')).length, [instances])
   const hostPressure = optimizer.hostPressure || { level:'healthy', reasons:[] }
   const capacity = optimizer.capacity || {}
   const recentEvents = (optimizer.history && optimizer.history.events ? optimizer.history.events : []).slice(-8).reverse()
@@ -434,6 +445,7 @@ export default function VMManager(){
             <div><strong>{optimizer.cfg?.activityWindowSeconds || 0}s</strong><span>Active window</span></div>
             <div><strong>{protectedCount}</strong><span>Protected VMs</span></div>
             <div><strong>{unstableCount}</strong><span>Unstable VMs</span></div>
+            <div><strong>{recoveringCount}</strong><span>Recovering/Degraded</span></div>
             <div><strong>{recentEvents.length}</strong><span>Recent events shown</span></div>
           </div>
           <div className="optimizer-policy-actions">
