@@ -1851,7 +1851,13 @@ def dashboard_vm_wrapper(name):
 
         # The page includes React + Babel via CDN so we can write a compact React component
         # for the fallback UI without changing the project's build pipeline.
-        fav_link = f'<link rel="icon" href="{fav_url}" />' if fav_url else ''
+        fav_link = ''
+        if fav_url:
+                fav_link = (
+                        f'<link rel="icon" href="{fav_url}" />'
+                        f'<link rel="shortcut icon" href="{fav_url}" />'
+                        f'<link rel="apple-touch-icon" href="{fav_url}" />'
+                )
         tmpl = '''<!doctype html>
     <html>
         <head>
@@ -1906,7 +1912,26 @@ def dashboard_vm_wrapper(name):
         <body>
             <div id="root"></div>
             <iframe id="vmframe" class="vm-iframe" src=__JS_URL__ style="display:none" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-popups"></iframe>
-            <script>window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__ };</script>
+            <script>
+              window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__ };
+              window.__VM_WRAPPER_FAVICON = __JS_FAVICON__;
+              (function(){
+                try {
+                  var href = window.__VM_WRAPPER_FAVICON;
+                  if(!href) return;
+                  var rels = ['icon', 'shortcut icon', 'apple-touch-icon'];
+                  rels.forEach(function(rel){
+                    var link = document.querySelector('link[rel="' + rel + '"]');
+                    if(!link){
+                      link = document.createElement('link');
+                      link.setAttribute('rel', rel);
+                      document.head.appendChild(link);
+                    }
+                    link.setAttribute('href', href);
+                  });
+                } catch(e) {}
+              })();
+            </script>
             <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
             <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
             <script src="https://unpkg.com/babel-standalone@6.26.0/babel.min.js"></script>
@@ -1918,7 +1943,7 @@ def dashboard_vm_wrapper(name):
         </body>
     </html>
     '''
-        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name)
+        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name).replace('__JS_FAVICON__', json.dumps(fav_url))
         resp = Response(page, mimetype='text/html')
         resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         resp.headers['Pragma'] = 'no-cache'
