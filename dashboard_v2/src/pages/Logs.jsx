@@ -23,15 +23,16 @@ export default function Logs(){
 
   async function fetchLogs(){
     try{
-      let r
+      let txt = ''
       if(source === 'optimizer'){
-        r = await apiFetch('/optimizer/logs')
+        const r = await apiFetch('/optimizer/logs')
+        txt = await r.text().catch(()=>'')
       }else{
         if(!selectedVm) return
-        r = await apiFetch(`/vm/logs/${encodeURIComponent(selectedVm)}`)
+        const r = await apiFetch(`/vm/logs/${encodeURIComponent(selectedVm)}`)
+        const j = await r.json().catch(()=>({ok:false, logs:''}))
+        txt = j.logs || j.error || ''
       }
-      const j = await r.json().catch(()=>({ok:false, logs:''}))
-      let txt = j.logs || j.error || ''
       if(filterText){
         const re = new RegExp(filterText, 'i')
         txt = txt.split('\n').filter(l=>re.test(l)).slice(-limit).join('\n')

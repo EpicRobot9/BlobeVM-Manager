@@ -16,6 +16,7 @@ import time
 import threading
 import subprocess
 import re
+import shutil
 
 STATE_DIR = os.environ.get('BLOBEDASH_STATE', '/opt/blobe-vm')
 LOG_DIR = '/var/blobe/logs/optimizer'
@@ -300,26 +301,59 @@ def _derive_host_pressure(stats: dict, cfg: dict):
     }
 
 
-def gather_stats():
-    out = {'mem': {}, 'swap': {}, 'containers': []}
-    # free -b
+def _meminfo_stats():
+    stats = {'mem': {}, 'swap': {}}
     try:
-        free = subprocess.check_output(['free', '-b'], text=True)
-        lines = free.split('\n')
-        memLine = next((l for l in lines if l.lower().startswith('mem:')), '')
-        parts = re.split(r'\s+', memLine.strip()) if memLine else []
-        if len(parts) >= 3:
-            out['mem']['total'] = int(parts[1])
-            out['mem']['used'] = int(parts[2])
-            if len(parts) >= 7:
-                out['mem']['available'] = int(parts[6])
-        swapLine = next((l for l in lines if l.lower().startswith('swap:')), '')
-        sp = re.split(r'\s+', swapLine.strip()) if swapLine else []
-        if len(sp) >= 3:
-            out['swap']['total'] = int(sp[1])
-            out['swap']['used'] = int(sp[2])
+        meminfo = {}
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if ':' not in line:
+                    continue
+                key, val = line.split(':', 1)
+                num = re.findall(r'\d+', val)
+                if num:
+                    meminfo[key.strip()] = int(num[0]) * 1024
+        total = int(meminfo.get('MemTotal') or 0)
+        available = int(meminfo.get('MemAvailable') or 0)
+        if not available:
+            freeish = int(meminfo.get('MemFree') or 0) + int(meminfo.get('Buffers') or 0) + int(meminfo.get('Cached') or 0)
+            available = freeish
+        used = max(0, total - available) if total else 0
+        stats['mem'] = {'total': total, 'used': used, 'available': available}
+        swap_total = int(meminfo.get('SwapTotal') or 0)
+        swap_free = int(meminfo.get('SwapFree') or 0)
+        stats['swap'] = {'total': swap_total, 'used': max(0, swap_total - swap_free)}
     except Exception:
         pass
+    return stats
+
+
+def gather_stats():
+    out = {'mem': {}, 'swap': {}, 'containers': []}
+    try:
+        if shutil.which('free'):
+            free = subprocess.check_output(['free', '-b'], text=True)
+            lines = free.split('\n')
+            memLine = next((l for l in lines if l.lower().startswith('mem:')), '')
+            parts = re.split(r'\s+', memLine.strip()) if memLine else []
+            if len(parts) >= 3:
+                out['mem']['total'] = int(parts[1])
+                out['mem']['used'] = int(parts[2])
+                if len(parts) >= 7:
+                    out['mem']['available'] = int(parts[6])
+            swapLine = next((l for l in lines if l.lower().startswith('swap:')), '')
+            sp = re.split(r'\s+', swapLine.strip()) if swapLine else []
+            if len(sp) >= 3:
+                out['swap']['total'] = int(sp[1])
+                out['swap']['used'] = int(sp[2])
+        else:
+            fallback = _meminfo_stats()
+            out['mem'] = fallback.get('mem') or {}
+            out['swap'] = fallback.get('swap') or {}
+    except Exception:
+        fallback = _meminfo_stats()
+        out['mem'] = fallback.get('mem') or {}
+        out['swap'] = fallback.get('swap') or {}
     # docker stats
     try:
         d = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}'], text=True)
@@ -557,15 +591,12 @@ def _run_cpu_guard(cfg, vm_state_map=None, host_pressure=None):
 def _run_swap_guard(cfg, vm_state_map=None, host_pressure=None):
     vm_state_map = vm_state_map or {}
     try:
-        out = subprocess.check_output(['free', '-b'], text=True)
-        lines = out.split('\n')
-        swapLine = next((l for l in lines if l.lower().startswith('swap')), '')
-        if swapLine:
-            parts = re.split(r'\s+', swapLine.strip())
-            total = int(parts[1]) if len(parts) > 1 else 0
-            used = int(parts[2]) if len(parts) > 2 else 0
-            perc = int(round(used / total * 100)) if total else 0
-            threshold = cfg.get('swapThreshold', 10)
+        swap = (gather_stats().get('swap') or {})
+        total = int(swap.get('total') or 0)
+        used = int(swap.get('used') or 0)
+        perc = int(round(used / total * 100)) if total else 0
+        threshold = cfg.get('swapThreshold', 10)
+        if total or used:
             if perc >= threshold:
                 relief = _stop_idle_pressure_vm(cfg, list(vm_state_map.values()), {'level': 'critical' if perc >= max(threshold, int(cfg.get('maxSwapPercent', 10))) else 'pressured'})
                 if relief:

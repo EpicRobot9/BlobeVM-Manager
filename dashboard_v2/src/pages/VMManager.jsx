@@ -43,8 +43,9 @@ function StatMeter({ label, value, tone='cpu' }){
   )
 }
 
-function VmCard({ vm, onAction, onDetails, busyAction, refreshing }){
+function VmCard({ vm, onAction, onDetails, onProfileChange, profileBusy, busyAction, refreshing }){
   const tone = toneFor(vm.status)
+  const profile = vm._profile || vm._optimizer?.profile || 'desktop'
   return (
     <div className={`vm-card vm-card-${tone}`}>
       <div className="vm-card-refresh" aria-hidden="true">
@@ -67,6 +68,17 @@ function VmCard({ vm, onAction, onDetails, busyAction, refreshing }){
       <div className="vm-card-meta">
         <div className="vm-meta-chip">Port: {vm.port || '—'}</div>
         <div className="vm-meta-chip">Name: {vm.name}</div>
+        <label className="vm-meta-chip" style={{ gap:8 }}>
+          <span>Type</span>
+          <select value={profile} disabled={profileBusy} onChange={e=>onProfileChange(vm.name, e.target.value)} style={{ background:'rgba(2,6,23,.8)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:8, padding:'4px 8px' }}>
+            <option value="light">light</option>
+            <option value="desktop">desktop</option>
+            <option value="interactive">interactive</option>
+            <option value="gaming">gaming</option>
+            <option value="background">background</option>
+            <option value="disposable">disposable</option>
+          </select>
+        </label>
       </div>
 
       <div className="vm-card-actions">
@@ -89,7 +101,8 @@ export default function VMManager(){
   const [logLoading, setLogLoading] = useState(false)
   const [announcement, setAnnouncement] = useState('')
   const [busyAction, setBusyAction] = useState('')
-  const [optimizer, setOptimizer] = useState({ capacity:{}, vmStates:[] })
+  const [optimizer, setOptimizer] = useState({ capacity:{}, vmStates:[], profiles:{} })
+  const [profileBusy, setProfileBusy] = useState('')
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
   const didLoadOnceRef = useRef(false)
@@ -111,10 +124,12 @@ export default function VMManager(){
       const optJ = rOpt && typeof rOpt.json === 'function' ? await rOpt.json().catch(()=>({ok:false})) : {ok:false}
       const statsMap = (statJ && statJ.vms) ? statJ.vms : {}
       const optimizerVmMap = Object.fromEntries(((optJ && optJ.vmStates) || []).map(v => [v.name, v]))
+      const profileMap = (optJ && optJ.profiles) || {}
       const insts = (j.instances || []).map(it => ({
         ...it,
         _stats: statsMap[it.name] || statsMap[''+it.name] || statsMap[it.name],
-        _optimizer: optimizerVmMap[it.name] || {}
+        _optimizer: optimizerVmMap[it.name] || {},
+        _profile: profileMap[it.name] || 'desktop'
       }))
 
       try{
@@ -214,6 +229,25 @@ export default function VMManager(){
     setTimeout(()=>load({ silent:true }), 800)
   }
 
+  async function setProfile(name, profile){
+    setProfileBusy(name)
+    try{
+      const r = await apiFetch(`/optimizer/profile/${encodeURIComponent(name)}`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ profile })
+      })
+      const j = await r.json().catch(()=>({ ok:r.ok }))
+      if(!r.ok || j.ok === false) throw new Error(j.error || `Failed to set profile for ${name}`)
+      setInstances(items => items.map(vm => vm.name === name ? { ...vm, _profile: j.profile || profile } : vm))
+      addToast({ title:name, message:`VM type set to ${j.profile || profile}`, type:'success', timeout:4000 })
+      setTimeout(()=>load({ silent:true }), 500)
+    }catch(e){
+      addToast({ title:name, message:String(e), type:'error', timeout:8000 })
+    }
+    setProfileBusy('')
+  }
+
   async function openDetails(name){
     setSelected(name)
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
@@ -286,7 +320,7 @@ export default function VMManager(){
             <div className="vm-empty-state">No VMs found. Wow. An empty fleet. Very intimidating.</div>
           ) : (
             <div className="vm-card-grid">
-              {instances.map(vm => <VmCard key={vm.name} vm={vm} onAction={action} onDetails={openDetails} busyAction={!!busyAction} refreshing={refreshing} />)}
+              {instances.map(vm => <VmCard key={vm.name} vm={vm} onAction={action} onDetails={openDetails} onProfileChange={setProfile} profileBusy={profileBusy === vm.name} busyAction={!!busyAction} refreshing={refreshing} />)}
             </div>
           )}
         </div>
