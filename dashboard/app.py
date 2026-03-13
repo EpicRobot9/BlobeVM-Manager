@@ -971,6 +971,22 @@ def _repo_manager_path():
 def _inst_dir():
     return os.path.join(_state_dir(), 'instances')
 
+
+def _instance_meta_path(name: str):
+    return os.path.join(_inst_dir(), name, 'instance.json')
+
+
+def _instance_meta(name: str):
+    path = _instance_meta_path(name)
+    try:
+        if os.path.isfile(path):
+            with open(path, 'r') as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
 def _flag_path(name: str, flag: str) -> str:
     return os.path.join(_inst_dir(), name, f'.{flag}')
 
@@ -1708,6 +1724,63 @@ def api_set_vm_title(name):
         pass
 
     return jsonify({'ok': bool(ok)})
+
+
+@app.get('/dashboard/api/vm-settings/<name>')
+@auth_required
+def api_get_vm_settings(name):
+    cfg = _load_dashboard_settings()
+    vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
+    meta = _instance_meta(name)
+    safe = re.sub(r'[^A-Za-z0-9_-]', '_', name)
+    fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{safe}.ico")
+    return jsonify({
+        'ok': True,
+        'name': name,
+        'title': vm_titles.get(name, ''),
+        'hostOverride': meta.get('host_override', ''),
+        'pathOverride': meta.get('path_override', ''),
+        'faviconUrl': f'/dashboard/vm-favicon/{name}.ico' if os.path.isfile(fav_path) else '',
+    })
+
+
+@app.post('/dashboard/api/vm-settings/<name>')
+@auth_required
+def api_set_vm_settings(name):
+    try:
+        data = request.get_json(silent=True) or {}
+        host_override = (data.get('hostOverride') if isinstance(data, dict) else None)
+        title = (data.get('title') if isinstance(data, dict) else None)
+
+        if title is not None:
+            cfg = _load_dashboard_settings()
+            vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
+            title = str(title).strip()
+            if title:
+                vm_titles[name] = title
+            else:
+                vm_titles.pop(name, None)
+            cfg['vm_titles'] = vm_titles
+            _save_dashboard_settings(cfg)
+            try:
+                mgr = shutil.which(MANAGER) or '/usr/local/bin/blobe-vm-manager'
+                if mgr and os.path.exists(mgr):
+                    subprocess.Popen([mgr, 'set-title', name, title], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+        if host_override is not None:
+            host_override = str(host_override).strip()
+            if host_override:
+                ok, out, err, rc = _run_manager('set-host', name, host_override)
+            else:
+                ok, out, err, rc = _run_manager('clear-host', name)
+            if not ok:
+                return jsonify({'ok': False, 'error': err or out or 'Failed updating VM host/domain setting', 'returncode': rc}), 500
+
+        return api_get_vm_settings(name)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.get('/dashboard/vm-favicon/<name>.ico')

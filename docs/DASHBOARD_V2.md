@@ -23,7 +23,7 @@ Pages
 Key Features
 
 - Live host metrics and charts (`/Dashboard/api/stats`).
-- VM management: start/stop/restart/delete, per-VM CPU/RAM bars, open VM links, and instance details modal.
+- VM management: create/start/stop/restart/delete VMs, per-VM CPU/RAM bars, open VM links, instance details modal, and per-VM presentation settings (custom domain/host override, tab title, favicon).
 - Logs viewer with server-side tailing (`/Dashboard/api/vm/logs/<name>`).
 - Per-VM stats endpoint (`/Dashboard/api/vm/stats`) showing container-level CPU/memory/network values (parses `docker stats --no-stream`).
 - VM execute endpoint (`/Dashboard/api/vm/exec/<name>`) for running short commands inside `blobevm_<name>` containers (10s timeout, returns stdout/stderr/exit code).
@@ -45,6 +45,11 @@ Important API Endpoints
 - `GET /Dashboard/api/vm/logs/<name>` — tail logs for `blobevm_<name>` containers.
 - `GET /Dashboard/api/vm/stats` — current container stats (parsed `docker stats --no-stream`).
 - `POST /Dashboard/api/vm/exec/<name>` — run a short command inside a container (10s timeout).
+- `POST /dashboard/api/create` — create a new VM from the v2 manager.
+- `POST /dashboard/api/delete/<name>` — delete a VM from the v2 manager.
+- `GET /dashboard/api/vm-settings/<name>` — read per-VM title, host/domain override, and favicon state.
+- `POST /dashboard/api/vm-settings/<name>` — update per-VM title and host/domain override.
+- `POST /dashboard/api/upload-vm-favicon/<name>` — upload a per-VM favicon for the wrapper tab.
 - `GET /dashboard/api/v2/info` — v2 build presence and `last_error` (protected by old dashboard auth).
 - `GET /dashboard/api/optimizer/v2/summary` — optimizer summary, host pressure, capacity, VM states, density profiles, and trends.
 - `POST /dashboard/api/optimizer/density-profile` — apply a built-in optimizer density profile.
