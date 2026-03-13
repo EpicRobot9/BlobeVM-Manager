@@ -1981,14 +1981,22 @@ def portal_vms_api():
 def portal_start_vm(name):
     if not _user_can_access_vm(request.portal_user, name):
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
-    return api_start(name)
+    try:
+        subprocess.check_call([MANAGER, 'start', name])
+        return jsonify({'ok': True})
+    except subprocess.CalledProcessError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 @app.post('/portal/api/stop/<name>')
 @portal_auth_required
 def portal_stop_vm(name):
     if not _user_can_access_vm(request.portal_user, name):
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
-    return api_stop(name)
+    try:
+        subprocess.check_call([MANAGER, 'stop', name])
+        return jsonify({'ok': True})
+    except subprocess.CalledProcessError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 @app.post('/portal/api/request-access/<name>')
 @portal_auth_required
