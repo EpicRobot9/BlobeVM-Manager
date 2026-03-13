@@ -162,11 +162,11 @@ if docker network inspect proxy >/dev/null 2>&1; then
   NET_ARGS+=(--label 'traefik.http.routers.blobedash-static-secure.service=blobedash')
   NET_ARGS+=(--label 'traefik.http.routers.blobedash-static-secure.tls=true')
   NET_ARGS+=(--label 'traefik.http.routers.blobedash-static-secure.tls.certresolver=myresolver')
-  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.rule=PathPrefix(`/vm/`)')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.rule=PathPrefix(`/vm/`) || PathPrefix(`/portal`)')
   NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.entrypoints=web')
   NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.service=blobedash')
   NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper.priority=10')
-  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.rule=PathPrefix(`/vm/`)')
+  NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.rule=PathPrefix(`/vm/`) || PathPrefix(`/portal`)')
   NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.entrypoints=websecure')
   NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.service=blobedash')
   NET_ARGS+=(--label 'traefik.http.routers.blobevm-wrapper-secure.tls=true')
@@ -176,7 +176,7 @@ fi
 
 docker run -d --name "$NAME" --restart unless-stopped \
   -p "${DASHBOARD_PORT}:5000" \
-  ${NET_ARGS[@]} \
+  "${NET_ARGS[@]}" \
   -v "$STATE_DIR:/opt/blobe-vm" \
   -v /var/blobe:/var/blobe \
   -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
