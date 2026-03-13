@@ -665,6 +665,7 @@ def _health_probe_urls(name: str, advertised_url: str):
         local_path += '/'
     scheme = 'https' if str(os.environ.get('ENABLE_TLS', '0')) == '1' else 'http'
     urls.append(f'{scheme}://127.0.0.1{local_path}')
+    urls.append(f'{scheme}://172.18.0.1{local_path}')
     return urls
 
 
