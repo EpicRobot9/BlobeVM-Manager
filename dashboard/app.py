@@ -3057,9 +3057,7 @@ def api_optimizer_set():
 def api_optimizer_logs():
     try:
         t = dash_optimizer.tail_logs()
-        if t is None or t == '':
-            return jsonify({'ok': False, 'error': 'no logs'}), 404
-        return Response(t, mimetype='text/plain')
+        return Response(t or '', mimetype='text/plain')
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
