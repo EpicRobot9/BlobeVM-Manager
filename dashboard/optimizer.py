@@ -639,6 +639,46 @@ def _run_swap_guard(cfg, vm_state_map=None, host_pressure=None):
     return None
 
 
+def _health_probe_urls(name: str, advertised_url: str):
+    urls = []
+    if advertised_url:
+        urls.append(advertised_url)
+    env_path = os.path.join(STATE_DIR, 'instances', name, '.env')
+    path_override = ''
+    try:
+        if os.path.isfile(env_path):
+            with open(env_path, 'r') as f:
+                for line in f:
+                    if line.startswith('PATH_OVERRIDE='):
+                        path_override = line.split('=', 1)[1].strip().strip("'\"")
+                        break
+    except Exception:
+        path_override = ''
+    base_path = os.environ.get('BASE_PATH', '/vm') or '/vm'
+    if not base_path.startswith('/'):
+        base_path = '/' + base_path
+    base_path = base_path.rstrip('/')
+    local_path = path_override or f'{base_path}/{name}/'
+    if not local_path.startswith('/'):
+        local_path = '/' + local_path
+    if not local_path.endswith('/'):
+        local_path += '/'
+    scheme = 'https' if str(os.environ.get('ENABLE_TLS', '0')) == '1' else 'http'
+    urls.append(f'{scheme}://127.0.0.1{local_path}')
+    return urls
+
+
+def _probe_healthy(urls):
+    for url in urls:
+        try:
+            r = subprocess.check_output(['curl', '-k', '-Is', '--max-time', '6', url], text=True)
+            if re.search(r'HTTP\/(1|2) [23]', r):
+                return True, url
+        except Exception:
+            continue
+    return False, ''
+
+
 def _run_health_guard(cfg, vm_state_map=None, host_pressure=None):
     vm_state_map = vm_state_map or {}
     try:
@@ -653,49 +693,46 @@ def _run_health_guard(cfg, vm_state_map=None, host_pressure=None):
                 if not url:
                     continue
                 protected = _is_vm_protected(vm_state_map.get(name))
-                try:
-                    r = subprocess.check_output(['curl', '-Is', '--max-time', '6', url], text=True)
-                    if not re.search(r'HTTP\/(1|2) [23]', r):
-                        stateDir = STATE_DIR
-                        f1 = os.path.join(stateDir, 'instances', name, '.health_warn')
-                        f2 = os.path.join(stateDir, 'instances', name, '.health_fail')
-                        if not os.path.exists(f1):
-                            log(f'Health warn for {name}'); open(f1, 'w').write(str(int(time.time())))
-                            return {'action': 'warn', 'name': name}
-                        if not os.path.exists(f2):
-                            if protected:
-                                log(f'skip health restart for {name} (protected active VM); emitting degraded warning only')
-                                return {'action': 'warn', 'name': name, 'reason': 'health-protected'}
-                            cooldown = int(cfg.get('guardCooldownSeconds', 300))
-                            if not _action_allowed(name, 'health-restart', cooldown):
-                                return {'action': 'cooldown', 'name': name, 'reason': 'health-restart'}
-                            log(f'Health restart container {name}'); open(f2, 'w').write(str(int(time.time())))
-                            subprocess.check_call(['docker', 'restart', f'blobevm_{name}'])
-                            return {'action': 'restart_container', 'name': name}
-                        if protected:
-                            return {'action': 'warn', 'name': name, 'reason': 'health-protected-recreate-skipped'}
-                        cooldown = int(cfg.get('guardCooldownSeconds', 300))
-                        if not _action_allowed(name, 'health-recreate', cooldown):
-                            return {'action': 'cooldown', 'name': name, 'reason': 'health-recreate'}
-                        log(f'Health recreate {name}')
+                stateDir = STATE_DIR
+                f1 = os.path.join(stateDir, 'instances', name, '.health_warn')
+                f2 = os.path.join(stateDir, 'instances', name, '.health_fail')
+                ok, good_url = _probe_healthy(_health_probe_urls(name, url))
+                if ok:
+                    if os.path.exists(f1):
                         try:
-                            subprocess.check_call(['blobe-vm-manager', 'recreate', name])
+                            os.remove(f1)
                         except Exception:
                             pass
-                        return {'action': 'recreate', 'name': name}
-                except Exception:
-                    stateDir = STATE_DIR
-                    f1 = os.path.join(stateDir, 'instances', name, '.health_warn')
-                    if not os.path.exists(f1):
-                        log(f'Health warn (curl fail) for {name}'); open(f1, 'w').write(str(int(time.time())))
-                        return {'action': 'warn', 'name': name}
+                    if os.path.exists(f2):
+                        try:
+                            os.remove(f2)
+                        except Exception:
+                            pass
+                    continue
+                if not os.path.exists(f1):
+                    log(f'Health warn for {name}'); open(f1, 'w').write(str(int(time.time())))
+                    return {'action': 'warn', 'name': name}
+                if not os.path.exists(f2):
                     if protected:
-                        return {'action': 'warn', 'name': name, 'reason': 'health-curlfail-protected'}
+                        log(f'skip health restart for {name} (protected active VM); emitting degraded warning only')
+                        return {'action': 'warn', 'name': name, 'reason': 'health-protected'}
                     cooldown = int(cfg.get('guardCooldownSeconds', 300))
-                    if not _action_allowed(name, 'health-curlfail-restart', cooldown):
-                        return {'action': 'cooldown', 'name': name, 'reason': 'health-curlfail-restart'}
-                    log(f'Health restart container (curl fail) {name}'); subprocess.check_call(['docker', 'restart', f'blobevm_{name}'])
+                    if not _action_allowed(name, 'health-restart', cooldown):
+                        return {'action': 'cooldown', 'name': name, 'reason': 'health-restart'}
+                    log(f'Health restart container {name}'); open(f2, 'w').write(str(int(time.time())))
+                    subprocess.check_call(['docker', 'restart', f'blobevm_{name}'])
                     return {'action': 'restart_container', 'name': name}
+                if protected:
+                    return {'action': 'warn', 'name': name, 'reason': 'health-protected-recreate-skipped'}
+                cooldown = int(cfg.get('guardCooldownSeconds', 300))
+                if not _action_allowed(name, 'health-recreate', cooldown):
+                    return {'action': 'cooldown', 'name': name, 'reason': 'health-recreate'}
+                log(f'Health recreate {name}')
+                try:
+                    subprocess.check_call(['blobe-vm-manager', 'recreate', name])
+                except Exception:
+                    pass
+                return {'action': 'recreate', 'name': name}
             except Exception:
                 pass
     except Exception as e:
