@@ -82,6 +82,14 @@ find_free_port() {
   return 1
 }
 
+
+maybe_auth_router_label() {
+  local router="$1"
+  local auth_mw="${2:-}"
+  [[ -z "$auth_mw" ]] && return 0
+  printf '%s' "--label=traefik.http.routers.${router}.middlewares=${auth_mw}"
+}
+
 usage() {
   local rc="${1:-1}"
   cat >&2 <<USAGE
@@ -243,13 +251,22 @@ common_labels() {
   if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
     return 0
   fi
-  local host_override path_override
+  local host_override path_override access_mode
   host_override="$(get_meta "$name" host_override || true)"
   path_override="$(get_meta "$name" path_override || true)"
+  access_mode="$(get_meta "$name" access_mode || true)"
+  [[ -z "$access_mode" ]] && access_mode="public"
   local labels=()
   labels+=("--label=traefik.docker.network=${TRAEFIK_NETWORK:-proxy}")
   labels+=("--label=traefik.enable=true")
   labels+=("--label=com.blobevm.managed=1")
+
+  local auth_mw=""
+  if [[ "$access_mode" == "restricted" ]]; then
+    auth_mw="${name}-portal-auth"
+    labels+=("--label=traefik.http.middlewares.${auth_mw}.forwardauth.address=http://blobedash:5000/dashboard/auth/vm/${name}")
+    labels+=("--label=traefik.http.middlewares.${auth_mw}.forwardauth.trustForwardHeader=true")
+  fi
 
   if [[ -n "$host_override" ]]; then
     # Host override + dual path router
@@ -269,10 +286,12 @@ common_labels() {
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}.service=${name}"
+      $(maybe_auth_router_label "${name}" "$auth_mw")
       "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)"
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}-path.service=${name}-path"
+      $(maybe_auth_router_label "${name}-path" "$auth_mw")
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       # Add HTTPS routers; include certresolver only when TLS is enabled
@@ -282,11 +301,13 @@ common_labels() {
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-secure.service=${name}"
+        $(maybe_auth_router_label "${name}-secure" "$auth_mw")
         "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)"
         "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
+        $(maybe_auth_router_label "${name}-path-secure" "$auth_mw")
       )
       labels+=(
         "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
@@ -303,10 +324,12 @@ common_labels() {
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}.service=${name}"
+      $(maybe_auth_router_label "${name}" "$auth_mw")
       "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)"
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}-path.service=${name}-path"
+      $(maybe_auth_router_label "${name}-path" "$auth_mw")
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
@@ -315,11 +338,13 @@ common_labels() {
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-secure.service=${name}"
+        $(maybe_auth_router_label "${name}-secure" "$auth_mw")
         "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)"
         "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
+        $(maybe_auth_router_label "${name}-path-secure" "$auth_mw")
       )
       labels+=(
         "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
@@ -342,6 +367,7 @@ common_labels() {
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}.service=${name}"
+      $(maybe_auth_router_label "${name}" "$auth_mw")
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
@@ -350,6 +376,7 @@ common_labels() {
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}-secure.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-secure.service=${name}-secure"
+        $(maybe_auth_router_label "${name}-secure" "$auth_mw")
       )
       labels+=("--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver")
     fi

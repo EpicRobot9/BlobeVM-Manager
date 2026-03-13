@@ -1895,6 +1895,21 @@ def api_upload_vm_favicon(name):
         return 'Not found', 404
 
 
+@app.get('/dashboard/auth/vm/<name>')
+def dashboard_vm_forward_auth(name):
+    user = _current_portal_user()
+    next_url = request.headers.get('X-Forwarded-Uri') or request.args.get('next') or f'/dashboard/vm/{name}/'
+    if not user:
+        login_url = '/portal/login?next=' + urlrequest.quote(next_url, safe='/:?=&%')
+        resp = Response('Unauthorized', 401)
+        resp.headers['Location'] = login_url
+        resp.headers['X-Portal-Login'] = login_url
+        return resp
+    if not _user_can_access_vm(user, name):
+        return Response('Forbidden', 403)
+    return Response('OK', 200)
+
+
 @app.post('/portal/api/auth/login')
 def portal_login_api():
     data = request.get_json(silent=True) or {}
@@ -2190,6 +2205,7 @@ def api_set_vm_settings(name):
             if access_mode not in ('public', 'restricted'):
                 return jsonify({'ok': False, 'error': 'Invalid access mode'}), 400
             _set_instance_meta(name, 'access_mode', access_mode)
+            changed_runtime = True
 
         if changed_runtime:
             ok, out, err, rc = _run_manager('recreate', name)
