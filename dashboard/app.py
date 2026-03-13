@@ -1781,7 +1781,7 @@ def api_get_vm_settings(name):
         'title': vm_titles.get(name, ''),
         'hostOverride': meta.get('host_override', ''),
         'pathOverride': meta.get('path_override', ''),
-        'faviconUrl': f'/dashboard/vm-favicon/{name}.ico' if os.path.isfile(fav_path) else '',
+        'faviconUrl': f'/dashboard/vm-favicon/{name}' if os.path.isfile(fav_path) else '',
     })
 
 
@@ -1822,6 +1822,7 @@ def api_set_vm_settings(name):
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.get('/dashboard/vm-favicon/<name>')
 @app.get('/dashboard/vm-favicon/<name>.ico')
 def dashboard_vm_favicon(name):
     # Serve per-VM favicon if exists, otherwise redirect to main favicon (which may itself redirect)
@@ -1849,7 +1850,7 @@ def dashboard_vm_wrapper(name):
         title = vm_titles.get(name) or f"EpicVM - {name}"
         vm_fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{re.sub(r'[^A-Za-z0-9_-]', '_', name)}.ico")
         if os.path.isfile(vm_fav_path):
-                fav_url = f'/dashboard/vm-favicon/{name}.ico?v={int(time.time())}'
+                fav_url = f'/dashboard/vm-favicon/{name}?v={int(time.time())}'
         else:
                 fav_local = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
                 if os.path.isfile(fav_local):
