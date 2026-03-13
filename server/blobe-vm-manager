@@ -187,7 +187,21 @@ vm_url() {
     local port_suffix=""
     if [[ "$scheme" == "http" && "$http_port" != "80" ]]; then port_suffix=":$http_port"; fi
     if [[ "$scheme" == "https" && "$https_port" != "443" ]]; then port_suffix=":$https_port"; fi
-    echo "${scheme}://${name}.${BLOBEVM_DOMAIN}${port_suffix}/"
+    local host_url="${scheme}://${name}.${BLOBEVM_DOMAIN}${port_suffix}/"
+    local pfx
+    if [[ -n "$path_override" ]]; then
+      pfx="$path_override"
+    else
+      pfx="${base_path}/${name}/"
+    fi
+    [[ "$pfx" != /* ]] && pfx="/$pfx"
+    [[ "$pfx" != */ ]] && pfx="$pfx/"
+    local root_url="${scheme}://${BLOBEVM_DOMAIN}${port_suffix}${pfx}"
+    if command -v getent >/dev/null 2>&1 && ! getent hosts "${name}.${BLOBEVM_DOMAIN}" >/dev/null 2>&1; then
+      echo "$root_url"
+    else
+      echo "$host_url"
+    fi
   else
     local ip
     ip="$(hostname -I | awk '{print $1}')"
