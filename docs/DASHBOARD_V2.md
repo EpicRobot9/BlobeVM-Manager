@@ -27,7 +27,7 @@ Key Features
 - Logs viewer with server-side tailing (`/Dashboard/api/vm/logs/<name>`).
 - Per-VM stats endpoint (`/Dashboard/api/vm/stats`) showing container-level CPU/memory/network values (parses `docker stats --no-stream`).
 - VM execute endpoint (`/Dashboard/api/vm/exec/<name>`) for running short commands inside `blobevm_<name>` containers (10s timeout, returns stdout/stderr/exit code).
-- Optimizer controls (integrates with `optimizer/` service endpoints if present).
+- Optimizer controls with density profiles (`single-user`, `small-group`, `multi-user`) plus custom capacity tuning for per-VM CPU/RAM budgeting and host reserve thresholds.
 - Toast notifications and a `VmExec` UI for running commands from the browser (non-interactive).
 
 Server-side Notes
@@ -46,6 +46,9 @@ Important API Endpoints
 - `GET /Dashboard/api/vm/stats` — current container stats (parsed `docker stats --no-stream`).
 - `POST /Dashboard/api/vm/exec/<name>` — run a short command inside a container (10s timeout).
 - `GET /dashboard/api/v2/info` — v2 build presence and `last_error` (protected by old dashboard auth).
+- `GET /dashboard/api/optimizer/v2/summary` — optimizer summary, host pressure, capacity, VM states, density profiles, and trends.
+- `POST /dashboard/api/optimizer/density-profile` — apply a built-in optimizer density profile.
+- `POST /dashboard/api/optimizer/set` — save custom optimizer settings field-by-field.
 
 Installer & Build Behavior
 
@@ -132,5 +135,10 @@ Troubleshooting
 Next Steps & Recommendations
 
 - Set `DASH_V2_SECRET` in production env vars.
+- Optimizer page now supports density presets for planning host capacity:
+  - `single-user`: conservative defaults for one main user.
+  - `small-group`: balanced settings for a few concurrent friends.
+  - `multi-user`: more aggressive packing assumptions for higher VM density.
+  - `custom`: manually set host CPU limits, RAM reserve, and estimated CPU/RAM budget per interactive or gaming VM.
 - Consider adding SSE/WebSocket streaming for interactive logs and terminals.
 - Optionally add an `nginx` sample config to `docs/` to show how to route `/Dashboard` and `/dashboard` behind a reverse proxy.

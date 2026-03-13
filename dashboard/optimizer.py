@@ -30,6 +30,36 @@ PROFILE_META_PATH = os.path.join(STATE_DIR, '.optimizer_profiles.json')
 HISTORY_META_PATH = os.path.join(STATE_DIR, '.optimizer_history.json')
 TREND_META_PATH = os.path.join(STATE_DIR, '.optimizer_trends.json')
 
+DENSITY_PROFILES = {
+    'single-user': {
+        'hostCpuSoftLimit': 75,
+        'hostCpuHardLimit': 90,
+        'minAvailableMemoryMb': 2048,
+        'gamingVmCpuBudgetPercent': 30,
+        'interactiveVmCpuBudgetPercent': 20,
+        'gamingVmMemoryMb': 3072,
+        'interactiveVmMemoryMb': 2048,
+    },
+    'small-group': {
+        'hostCpuSoftLimit': 80,
+        'hostCpuHardLimit': 92,
+        'minAvailableMemoryMb': 1536,
+        'gamingVmCpuBudgetPercent': 24,
+        'interactiveVmCpuBudgetPercent': 16,
+        'gamingVmMemoryMb': 2560,
+        'interactiveVmMemoryMb': 1792,
+    },
+    'multi-user': {
+        'hostCpuSoftLimit': 82,
+        'hostCpuHardLimit': 94,
+        'minAvailableMemoryMb': 1536,
+        'gamingVmCpuBudgetPercent': 20,
+        'interactiveVmCpuBudgetPercent': 14,
+        'gamingVmMemoryMb': 2304,
+        'interactiveVmMemoryMb': 1536,
+    },
+}
+
 DEFAULT_CFG = {
     'enabled': True,
     'guards': {'memory': True, 'cpu': True, 'swap': True, 'health': True},
@@ -51,6 +81,11 @@ DEFAULT_CFG = {
     'blockStartsOnPressure': True,
     'allowForceStartUnderPressure': True,
     'protectedRestartCooldownSeconds': 900,
+    'densityProfile': 'single-user',
+    'gamingVmCpuBudgetPercent': 30,
+    'interactiveVmCpuBudgetPercent': 20,
+    'gamingVmMemoryMb': 3072,
+    'interactiveVmMemoryMb': 2048,
 }
 
 
@@ -89,6 +124,22 @@ def save_config(cfg: dict) -> bool:
     except Exception as e:
         log(f'failed saving cfg: {e}')
         return False
+
+
+def available_density_profiles():
+    return {k: dict(v) for k, v in DENSITY_PROFILES.items()}
+
+
+def apply_density_profile(profile: str):
+    chosen = (profile or 'single-user').strip().lower()
+    if chosen not in DENSITY_PROFILES:
+        chosen = 'single-user'
+    cfg = load_config()
+    for key, value in DENSITY_PROFILES[chosen].items():
+        cfg[key] = value
+    cfg['densityProfile'] = chosen
+    save_config(cfg)
+    return {'profile': chosen, 'cfg': cfg}
 
 
 def _docker_ps_names():
@@ -921,10 +972,14 @@ def _estimate_capacity(cfg: dict, stats: dict, vm_states, host_pressure: dict):
     interactive = [v for v in active if v.get('profile') in ('interactive', 'gaming')]
     soft_limit = float(cfg.get('hostCpuSoftLimit', 75) or 75)
     cpu_headroom = max(0.0, soft_limit - float(host_pressure.get('vmCpuTotal') or 0.0))
-    est_game_slots_by_mem = max(0, int(free_for_vms_mb / 3072)) if free_for_vms_mb else 0
-    est_game_slots_by_cpu = max(0, int(cpu_headroom / 30.0)) if cpu_headroom else 0
-    est_interactive_slots_by_mem = max(0, int(free_for_vms_mb / 2048)) if free_for_vms_mb else 0
-    est_interactive_slots_by_cpu = max(0, int(cpu_headroom / 20.0)) if cpu_headroom else 0
+    game_mem_budget = max(256, int(cfg.get('gamingVmMemoryMb', 3072) or 3072))
+    game_cpu_budget = max(1.0, float(cfg.get('gamingVmCpuBudgetPercent', 30) or 30))
+    interactive_mem_budget = max(256, int(cfg.get('interactiveVmMemoryMb', 2048) or 2048))
+    interactive_cpu_budget = max(1.0, float(cfg.get('interactiveVmCpuBudgetPercent', 20) or 20))
+    est_game_slots_by_mem = max(0, int(free_for_vms_mb / game_mem_budget)) if free_for_vms_mb else 0
+    est_game_slots_by_cpu = max(0, int(cpu_headroom / game_cpu_budget)) if cpu_headroom else 0
+    est_interactive_slots_by_mem = max(0, int(free_for_vms_mb / interactive_mem_budget)) if free_for_vms_mb else 0
+    est_interactive_slots_by_cpu = max(0, int(cpu_headroom / interactive_cpu_budget)) if cpu_headroom else 0
     projected_game_capacity = min(est_game_slots_by_mem, est_game_slots_by_cpu)
     projected_interactive_capacity = min(est_interactive_slots_by_mem, est_interactive_slots_by_cpu)
     suitability = 'good'
@@ -944,6 +999,11 @@ def _estimate_capacity(cfg: dict, stats: dict, vm_states, host_pressure: dict):
         'estimatedAdditionalInteractiveSlots': projected_interactive_capacity,
         'gamingSuitability': suitability,
         'totalMemoryMb': total_mb,
+        'densityProfile': cfg.get('densityProfile', 'single-user'),
+        'gamingVmCpuBudgetPercent': game_cpu_budget,
+        'interactiveVmCpuBudgetPercent': interactive_cpu_budget,
+        'gamingVmMemoryMb': game_mem_budget,
+        'interactiveVmMemoryMb': interactive_mem_budget,
     }
 
 
@@ -1144,6 +1204,7 @@ def status():
         'reliefCandidates': _relief_candidates(vm_states),
         'recommendations': _build_recommendations(cfg, raw_stats, vm_states, host_pressure),
         'profiles': load_profiles(),
+        'densityProfiles': available_density_profiles(),
         'history': _history_state(),
         'trends': _trend_state(),
     }

@@ -2974,6 +2974,7 @@ def api_optimizer_v2_summary():
             'vmStates': stats.get('vmStates') or [],
             'recommendations': stats.get('recommendations') or [],
             'profiles': stats.get('profiles') or {},
+            'densityProfiles': stats.get('densityProfiles') or {},
             'history': stats.get('history') or {},
             'trends': stats.get('trends') or {},
             'cfg': s.get('cfg') or {},
@@ -2993,6 +2994,20 @@ def api_optimizer_profile(name):
             return jsonify({'ok': False, 'error': 'missing profile'}), 400
         chosen = dash_optimizer.set_vm_profile(name, profile)
         return jsonify({'ok': True, 'name': name, 'profile': chosen})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/optimizer/density-profile')
+@auth_required
+def api_optimizer_density_profile():
+    try:
+        data = request.get_json(silent=True) or {}
+        profile = data.get('profile') if isinstance(data, dict) else None
+        if not profile:
+            return jsonify({'ok': False, 'error': 'missing profile'}), 400
+        result = dash_optimizer.apply_density_profile(profile)
+        return jsonify({'ok': True, 'profile': result.get('profile'), 'cfg': result.get('cfg'), 'profiles': dash_optimizer.available_density_profiles()})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

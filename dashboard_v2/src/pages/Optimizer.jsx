@@ -21,10 +21,11 @@ function SettingField({ label, value, onChange, type='number', min, step }){
 }
 
 export default function Optimizer(){
-  const [summary, setSummary] = useState({ hostPressure:{ level:'healthy', reasons:[] }, capacity:{}, reliefCandidates:[], recommendations:[], vmStates:[], cfg:{}, history:{ events:[] }, trends:{ points:[] } })
+  const [summary, setSummary] = useState({ hostPressure:{ level:'healthy', reasons:[] }, capacity:{}, reliefCandidates:[], recommendations:[], vmStates:[], cfg:{}, history:{ events:[] }, trends:{ points:[] }, densityProfiles:{} })
   const [logs, setLogs] = useState('')
   const [running, setRunning] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [applyingDensity, setApplyingDensity] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState({})
 
   async function loadStatus(){
@@ -34,11 +35,16 @@ export default function Optimizer(){
       if(j && j.ok){
         setSummary(j)
         setSettingsDraft({
+          densityProfile: j.cfg?.densityProfile ?? 'single-user',
           hostCpuSoftLimit: j.cfg?.hostCpuSoftLimit ?? 75,
           hostCpuHardLimit: j.cfg?.hostCpuHardLimit ?? 90,
           minAvailableMemoryMb: j.cfg?.minAvailableMemoryMb ?? 2048,
           maxSwapPercent: j.cfg?.maxSwapPercent ?? 10,
           activityWindowSeconds: j.cfg?.activityWindowSeconds ?? 300,
+          gamingVmCpuBudgetPercent: j.cfg?.gamingVmCpuBudgetPercent ?? 30,
+          interactiveVmCpuBudgetPercent: j.cfg?.interactiveVmCpuBudgetPercent ?? 20,
+          gamingVmMemoryMb: j.cfg?.gamingVmMemoryMb ?? 3072,
+          interactiveVmMemoryMb: j.cfg?.interactiveVmMemoryMb ?? 2048,
           protectActiveVms: !!j.cfg?.protectActiveVms,
           blockStartsOnPressure: !!j.cfg?.blockStartsOnPressure,
         })
@@ -68,11 +74,16 @@ export default function Optimizer(){
     setSaving(true)
     try{
       const entries = [
+        ['densityProfile', 'custom'],
         ['hostCpuSoftLimit', Number(settingsDraft.hostCpuSoftLimit || 75)],
         ['hostCpuHardLimit', Number(settingsDraft.hostCpuHardLimit || 90)],
         ['minAvailableMemoryMb', Number(settingsDraft.minAvailableMemoryMb || 2048)],
         ['maxSwapPercent', Number(settingsDraft.maxSwapPercent || 10)],
         ['activityWindowSeconds', Number(settingsDraft.activityWindowSeconds || 300)],
+        ['gamingVmCpuBudgetPercent', Number(settingsDraft.gamingVmCpuBudgetPercent || 30)],
+        ['interactiveVmCpuBudgetPercent', Number(settingsDraft.interactiveVmCpuBudgetPercent || 20)],
+        ['gamingVmMemoryMb', Number(settingsDraft.gamingVmMemoryMb || 3072)],
+        ['interactiveVmMemoryMb', Number(settingsDraft.interactiveVmMemoryMb || 2048)],
         ['protectActiveVms', !!settingsDraft.protectActiveVms],
         ['blockStartsOnPressure', !!settingsDraft.blockStartsOnPressure],
       ]
@@ -91,6 +102,29 @@ export default function Optimizer(){
       alert(String(e))
     }
     setSaving(false)
+  }
+
+  async function applyDensityProfile(profile){
+    if(!profile) return
+    if(profile === 'custom'){
+      setSettingsDraft(s => ({ ...s, densityProfile: 'custom' }))
+      return
+    }
+    setApplyingDensity(true)
+    try{
+      const r = await apiFetch('/optimizer/density-profile', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ profile })
+      })
+      const j = await r.json().catch(()=>({ ok:r.ok }))
+      if(!r.ok || j.ok === false) throw new Error(j.error || `Failed to apply ${profile}`)
+      await loadStatus()
+    }catch(e){
+      console.error('apply density profile', e)
+      alert(String(e))
+    }
+    setApplyingDensity(false)
   }
 
   useEffect(()=>{
@@ -151,17 +185,37 @@ export default function Optimizer(){
 
       <div className="glass-card" style={{marginTop:16}}>
         <div className="optimizer-card-label">Policy settings</div>
+        <div style={{display:'grid', gap:12, marginTop:12}}>
+          <label className="optimizer-setting-field">
+            <span>Density profile</span>
+            <select value={settingsDraft.densityProfile ?? 'single-user'} disabled={applyingDensity} onChange={e=>applyDensityProfile(e.target.value)}>
+              <option value="single-user">Single user / low density</option>
+              <option value="small-group">Small group / balanced</option>
+              <option value="multi-user">Multi-user / higher density</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <div className="optimizer-reason-list" style={{marginTop:0}}>
+            <div>Current profile: <strong>{summary.capacity?.densityProfile || summary.cfg?.densityProfile || 'single-user'}</strong></div>
+            <div>Gaming budget per VM: {summary.capacity?.gamingVmCpuBudgetPercent ?? settingsDraft.gamingVmCpuBudgetPercent ?? 30}% CPU / {summary.capacity?.gamingVmMemoryMb ?? settingsDraft.gamingVmMemoryMb ?? 3072} MB RAM</div>
+            <div>Interactive budget per VM: {summary.capacity?.interactiveVmCpuBudgetPercent ?? settingsDraft.interactiveVmCpuBudgetPercent ?? 20}% CPU / {summary.capacity?.interactiveVmMemoryMb ?? settingsDraft.interactiveVmMemoryMb ?? 2048} MB RAM</div>
+          </div>
+        </div>
         <div className="optimizer-settings-grid" style={{marginTop:12}}>
-          <SettingField label="Host CPU soft limit" value={settingsDraft.hostCpuSoftLimit ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, hostCpuSoftLimit: e.target.value }))} />
-          <SettingField label="Host CPU hard limit" value={settingsDraft.hostCpuHardLimit ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, hostCpuHardLimit: e.target.value }))} />
-          <SettingField label="Minimum available RAM (MB)" value={settingsDraft.minAvailableMemoryMb ?? ''} min={128} step={128} onChange={e=>setSettingsDraft(s => ({ ...s, minAvailableMemoryMb: e.target.value }))} />
-          <SettingField label="Max swap percent" value={settingsDraft.maxSwapPercent ?? ''} min={0} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, maxSwapPercent: e.target.value }))} />
-          <SettingField label="Activity window (seconds)" value={settingsDraft.activityWindowSeconds ?? ''} min={30} step={30} onChange={e=>setSettingsDraft(s => ({ ...s, activityWindowSeconds: e.target.value }))} />
-          <label className="optimizer-toggle-field"><input type="checkbox" checked={!!settingsDraft.protectActiveVms} onChange={e=>setSettingsDraft(s => ({ ...s, protectActiveVms: e.target.checked }))} /><span>Protect active VMs from disruptive recovery</span></label>
-          <label className="optimizer-toggle-field"><input type="checkbox" checked={!!settingsDraft.blockStartsOnPressure} onChange={e=>setSettingsDraft(s => ({ ...s, blockStartsOnPressure: e.target.checked }))} /><span>Block new starts under pressure</span></label>
+          <SettingField label="Host CPU soft limit" value={settingsDraft.hostCpuSoftLimit ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', hostCpuSoftLimit: e.target.value }))} />
+          <SettingField label="Host CPU hard limit" value={settingsDraft.hostCpuHardLimit ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', hostCpuHardLimit: e.target.value }))} />
+          <SettingField label="Minimum available RAM (MB)" value={settingsDraft.minAvailableMemoryMb ?? ''} min={128} step={128} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', minAvailableMemoryMb: e.target.value }))} />
+          <SettingField label="Max swap percent" value={settingsDraft.maxSwapPercent ?? ''} min={0} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', maxSwapPercent: e.target.value }))} />
+          <SettingField label="Activity window (seconds)" value={settingsDraft.activityWindowSeconds ?? ''} min={30} step={30} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', activityWindowSeconds: e.target.value }))} />
+          <SettingField label="Gaming VM CPU budget (%)" value={settingsDraft.gamingVmCpuBudgetPercent ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', gamingVmCpuBudgetPercent: e.target.value }))} />
+          <SettingField label="Interactive VM CPU budget (%)" value={settingsDraft.interactiveVmCpuBudgetPercent ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', interactiveVmCpuBudgetPercent: e.target.value }))} />
+          <SettingField label="Gaming VM RAM budget (MB)" value={settingsDraft.gamingVmMemoryMb ?? ''} min={256} step={128} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', gamingVmMemoryMb: e.target.value }))} />
+          <SettingField label="Interactive VM RAM budget (MB)" value={settingsDraft.interactiveVmMemoryMb ?? ''} min={256} step={128} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', interactiveVmMemoryMb: e.target.value }))} />
+          <label className="optimizer-toggle-field"><input type="checkbox" checked={!!settingsDraft.protectActiveVms} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', protectActiveVms: e.target.checked }))} /><span>Protect active VMs from disruptive recovery</span></label>
+          <label className="optimizer-toggle-field"><input type="checkbox" checked={!!settingsDraft.blockStartsOnPressure} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', blockStartsOnPressure: e.target.checked }))} /><span>Block new starts under pressure</span></label>
         </div>
         <div className="optimizer-settings-actions">
-          <Button onClick={saveSettings} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</Button>
+          <Button onClick={saveSettings} disabled={saving || applyingDensity}>{saving ? 'Saving…' : 'Save custom settings'}</Button>
         </div>
       </div>
 
