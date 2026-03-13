@@ -8,8 +8,12 @@ export async function apiFetch(path, opts={}){
   const token = getToken()
   if(token) headers['Authorization'] = 'Bearer ' + token
   opts.headers = headers
-  const res = await fetch(API_BASE + path, opts)
-  if(res.status === 401) throw new Error('Unauthorized')
+  const res = await fetch(API_BASE + path, { credentials:'same-origin', ...opts })
+  if(res.status === 401){
+    setTok('')
+    try { window.location.href = '/Dashboard' } catch (_) {}
+    throw new Error('Unauthorized')
+  }
   return res
 }
 
