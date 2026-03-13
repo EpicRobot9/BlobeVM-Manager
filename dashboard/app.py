@@ -987,6 +987,19 @@ def _instance_meta(name: str):
         pass
     return {}
 
+
+def _set_instance_meta(name: str, key: str, value):
+    path = _instance_meta_path(name)
+    data = _instance_meta(name)
+    if value in (None, ''):
+        data.pop(key, None)
+    else:
+        data[key] = value
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+    return data
+
 def _flag_path(name: str, flag: str) -> str:
     return os.path.join(_inst_dir(), name, f'.{flag}')
 
@@ -1751,6 +1764,7 @@ def api_set_vm_settings(name):
         data = request.get_json(silent=True) or {}
         host_override = (data.get('hostOverride') if isinstance(data, dict) else None)
         title = (data.get('title') if isinstance(data, dict) else None)
+        changed_runtime = False
 
         if title is not None:
             cfg = _load_dashboard_settings()
@@ -1762,21 +1776,18 @@ def api_set_vm_settings(name):
                 vm_titles.pop(name, None)
             cfg['vm_titles'] = vm_titles
             _save_dashboard_settings(cfg)
-            try:
-                mgr = shutil.which(MANAGER) or '/usr/local/bin/blobe-vm-manager'
-                if mgr and os.path.exists(mgr):
-                    subprocess.Popen([mgr, 'set-title', name, title], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
+            _set_instance_meta(name, 'title', title)
+            changed_runtime = True
 
         if host_override is not None:
             host_override = str(host_override).strip()
-            if host_override:
-                ok, out, err, rc = _run_manager('set-host', name, host_override)
-            else:
-                ok, out, err, rc = _run_manager('clear-host', name)
+            _set_instance_meta(name, 'host_override', host_override)
+            changed_runtime = True
+
+        if changed_runtime:
+            ok, out, err, rc = _run_manager('recreate', name)
             if not ok:
-                return jsonify({'ok': False, 'error': err or out or 'Failed updating VM host/domain setting', 'returncode': rc}), 500
+                return jsonify({'ok': False, 'error': err or out or 'Failed recreating VM with updated settings', 'returncode': rc}), 500
 
         return api_get_vm_settings(name)
     except Exception as e:
