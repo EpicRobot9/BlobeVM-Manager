@@ -83,13 +83,15 @@ find_free_port() {
 }
 
 usage() {
+  local rc="${1:-1}"
   cat >&2 <<USAGE
 Usage: blobe-vm-manager <command> [args]
 
 Commands:
+  help                         # show this help
   list
   set-title <name> <title>     # set per-VM title and recreate container
-  list-ports                 # direct mode: show VM -> port
+  list-ports                   # direct mode: show VM -> port
   create <name>
   start <name>
   stop <name>
@@ -97,7 +99,7 @@ Commands:
   status <name>              # print container status and URL
   check [--no-fix] <name>    # HTTP check the VM URL; optional --no-fix to skip auto-resolve
   delete <name>
-  delete-all-instances       # delete all VM instances and containers (keeps image/stack)
+  delete-all-instances [--yes] # delete all VM instances and containers (keeps image/stack)
   rename <old> <new>
   set-host <name> <fqdn>
   clear-host <name>
@@ -117,12 +119,14 @@ Commands:
   pull-repo                  # git pull in REPO_DIR (if a git repo)
   update-and-rebuild [vms..] # pull repo, rebuild image, recreate all or specified VMs
   update-vm <name>           # apt update/upgrade inside VM container
+  apps                        # list available app installer scripts
   app-install <name> <app>   # install an app inside the VM (if script exists)
   app-status <name> <app>    # check if an app binary exists in VM
   app-uninstall <name> <app> # uninstall/remove an app from the VM
   app-reinstall <name> <app> # uninstall then install the app
+  nuke [--yes]               # uninstall everything created by installer
 USAGE
-  exit 1
+  exit "$rc"
 }
 
 ensure_instance_dir() {
@@ -137,6 +141,19 @@ instance_exists() {
 container_name() {
   local name="$1"
   echo "blobevm_${name}"
+}
+
+validate_vm_name() {
+  local name="$1"
+  [[ -n "$name" && "$name" =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]]
+}
+
+require_valid_vm_name() {
+  local name="$1"
+  if ! validate_vm_name "$name"; then
+    echo "Invalid VM name '$name'. Use 1-63 chars: lowercase letters, numbers, dot, underscore, dash; must start with letter/number." >&2
+    exit 1
+  fi
 }
 
 vm_url() {
@@ -507,6 +524,7 @@ cmd_list() {
 
 cmd_create() {
   local name="${1:-}"; [[ -z "$name" ]] && usage
+  require_valid_vm_name "$name"
   ensure_instance_dir
   if instance_exists "$name"; then
     echo "Instance '$name' already exists." >&2
@@ -648,9 +666,12 @@ cmd_delete() {
 }
 
 cmd_delete_all_instances() {
-  echo "This will remove ALL VM instances but keep Traefik and the image."
-  read -rp "Type 'DELETE' to confirm: " confirm
-  [[ "$confirm" == "DELETE" ]] || { echo "Aborted."; exit 1; }
+  local assume_yes="${1:-}"
+  if [[ "$assume_yes" != "--yes" ]]; then
+    echo "This will remove ALL VM instances but keep Traefik and the image."
+    read -rp "Type 'DELETE' to confirm: " confirm
+    [[ "$confirm" == "DELETE" ]] || { echo "Aborted."; exit 1; }
+  fi
   shopt -s nullglob
   for d in "$INST_DIR"/*; do
     [[ -d "$d" ]] || continue
@@ -713,6 +734,22 @@ _copy_app_script_into_vm() {
   [[ -f "$host_script" ]] || { echo "App script not found: $app" >&2; return 2; }
   docker cp "$host_script" "$cname:/tmp/app-${app}.sh"
   docker exec -u 0 "$cname" bash -lc "chmod +x /tmp/app-${app}.sh"
+}
+
+cmd_apps() {
+  local apps_dir="${REPO_DIR:-/opt/blobe-vm}/root/installable-apps"
+  if [[ ! -d "$apps_dir" ]]; then
+    echo "No installable apps directory found at: $apps_dir"
+    return 0
+  fi
+  echo "Available apps:"
+  shopt -s nullglob
+  local found=0
+  for f in "$apps_dir"/*.sh; do
+    found=1
+    echo "- $(basename "$f" .sh)"
+  done
+  [[ "$found" -eq 1 ]] || echo "- (none)"
 }
 
 cmd_app_install() {
@@ -941,6 +978,8 @@ recreate_container() {
 cmd_rename() {
   local old="${1:-}" new="${2:-}"
   [[ -z "$old" || -z "$new" ]] && usage
+  require_valid_vm_name "$old"
+  require_valid_vm_name "$new"
   [[ "$old" == "$new" ]] && { echo "Old and new names are the same." >&2; exit 1; }
   ensure_instance_dir
   instance_exists "$old" || { echo "Instance '$old' does not exist." >&2; exit 1; }
@@ -1152,6 +1191,7 @@ cmd_clear_base_path() {
 main() {
   local cmd="${1:-}"; shift || true
   case "$cmd" in
+    ""|-h|--help|help) usage 0 ;;
     list)   cmd_list "$@" ;;
     list-ports) cmd_list_ports "$@" ;;
     create) cmd_create "$@" ;;
@@ -1181,6 +1221,8 @@ main() {
   rebuild-vms) cmd_rebuild_vms "$@" ;;
   pull-repo) cmd_pull_repo "$@" ;;
   update-and-rebuild) cmd_update_and_rebuild "$@" ;;
+  update-vm) cmd_update_vm "$@" ;;
+  apps) cmd_apps "$@" ;;
     nuke)   cmd_nuke "$@" ;;
     set-host-interactive) cmd_set_host_interactive "$@" ;;
     set-base-path) cmd_set_base_path "$@" ;;
@@ -1196,11 +1238,14 @@ main() {
 }
 
 cmd_nuke() {
-  echo "This will remove ALL BlobeVM instances, BlobeVM dashboard, Traefik stack (if deployed by BlobeVM), data, images, related volumes, and the manager binary."
-  read -rp "Type 'NUKE' to confirm: " confirm
-  if [[ "$confirm" != "NUKE" ]]; then
-    echo "Aborted."
-    exit 1
+  local assume_yes="${1:-}"
+  if [[ "$assume_yes" != "--yes" ]]; then
+    echo "This will remove ALL BlobeVM instances, BlobeVM dashboard, Traefik stack (if deployed by BlobeVM), data, images, related volumes, and the manager binary."
+    read -rp "Type 'NUKE' to confirm: " confirm
+    if [[ "$confirm" != "NUKE" ]]; then
+      echo "Aborted."
+      exit 1
+    fi
   fi
 
   echo "Stopping and removing instance containers..."

@@ -4,7 +4,8 @@
 Start a new blank codespace by going to https://github.com/codespaces/ and choosing the "Blank" template. Then run:
 ```
 
-For a full description of the new modern dashboard (Dashboard v2), see `docs/DASHBOARD_V2.md` which documents pages, server endpoints, installer behavior, build instructions, environment variables, and troubleshooting tips.
+For a full description of the new modern dashboard (Dashboard v2), see `docs/DASHBOARD_V2.md`.
+For full CLI reference (including `apps`, `update-vm`, and `--yes` automation flags), see `docs/CLI.md`.
 
 curl -O https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/install.sh
 chmod +x install.sh
@@ -102,6 +103,13 @@ blobe-vm-manager check alpha           # returns OK/FAIL; auto-resolves common 4
 blobe-vm-manager check --no-fix alpha  # report-only (no auto-resolve)
 # 3) Docker (optional)
 docker ps --filter name=blobevm_alpha --format '{{.Names}} {{.Status}}'
+
+# Patch/upgrade packages inside a VM
+blobe-vm-manager update-vm alpha
+
+# List available app installers and install one
+blobe-vm-manager apps
+blobe-vm-manager app-install alpha chrome
 
 # Delete
 blobe-vm-manager delete alpha
@@ -215,6 +223,12 @@ To remove all BlobeVM instances, Traefik, data, images, and the CLI:
 blobe-vm-manager nuke
 ```
 You’ll be prompted to confirm.
+
+For non-interactive automation:
+```
+blobe-vm-manager delete-all-instances --yes
+blobe-vm-manager nuke --yes
+```
 
 Notes:
 - KVM passthrough can be enabled if `/dev/kvm` is present on the host and selected during install.
