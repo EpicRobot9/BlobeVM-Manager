@@ -287,7 +287,7 @@ common_labels() {
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}.service=${name}"
       $(maybe_auth_router_label "${name}" "$auth_mw")
-      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)"
+      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}-path.service=${name}-path"
@@ -302,7 +302,7 @@ common_labels() {
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-secure.service=${name}"
         $(maybe_auth_router_label "${name}-secure" "$auth_mw")
-        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)"
+        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
         "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
@@ -325,7 +325,7 @@ common_labels() {
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}.service=${name}"
       $(maybe_auth_router_label "${name}" "$auth_mw")
-      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)"
+      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}-path.service=${name}-path"
@@ -339,7 +339,7 @@ common_labels() {
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-secure.service=${name}"
         $(maybe_auth_router_label "${name}-secure" "$auth_mw")
-        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)"
+        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
         "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
@@ -363,7 +363,7 @@ common_labels() {
     [[ "$prefix" != /* ]] && prefix="/$prefix"
     prefix="${prefix%/}"
     labels+=(
-      "--label=traefik.http.routers.${name}.rule=PathPrefix(\`$prefix/\`)"
+      "--label=traefik.http.routers.${name}.rule=PathPrefix(\`$prefix/\`)&&!Path(\`$prefix/\`)"
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}.service=${name}"
@@ -371,7 +371,7 @@ common_labels() {
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
-        "--label=traefik.http.routers.${name}-secure.rule=PathPrefix(\`$prefix/\`)"
+        "--label=traefik.http.routers.${name}-secure.rule=PathPrefix(\`$prefix/\`)&&!Path(\`$prefix/\`)"
         "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}-secure.loadbalancer.server.port=3000"
@@ -382,8 +382,8 @@ common_labels() {
     fi
   fi
 
-  # Emit all labels as separate tokens for docker run
-  printf '%s ' "${labels[@]}"
+  # Emit all labels newline-delimited so callers can safely read into an array.
+  printf '%s\n' "${labels[@]}"
 }
 
 run_container() {
@@ -419,6 +419,10 @@ run_container() {
 
   local publish_args=()
   local net_args=()
+  local common_label_args=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && common_label_args+=("$line")
+  done < <(common_labels "$name")
   if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
     # Determine and persist a host port for this VM (reassign if busy)
     local host_port

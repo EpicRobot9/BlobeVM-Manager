@@ -2299,6 +2299,7 @@ def dashboard_vm_wrapper(name):
                 else:
                         fav_url = cfg.get('favicon','')
 
+        asset_ver = str(int(time.time()))
         # Safely embed necessary values for the client script
         try:
                 js_title = json.dumps(title)
@@ -2411,14 +2412,14 @@ def dashboard_vm_wrapper(name):
             <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
             <script src="https://unpkg.com/babel-standalone@6.26.0/babel.min.js"></script>
             <script>window.__VM_WRAPPER_ASSET_VER = Date.now().toString();</script>
-            <script type="text/babel" src="/static/js/api/vms.js?v=20260312b"></script>
-            <script type="text/babel" src="/static/js/hooks/useVMStatus.js?v=20260312b"></script>
-            <script type="text/babel" src="/static/js/components/VMFallback.jsx?v=20260312b"></script>
-            <script type="text/babel" src="/static/js/main_vm_wrapper.jsx?v=20260312b"></script>
+            <script type="text/babel" src="/static/js/api/vms.js?v=__ASSET_VER__"></script>
+            <script type="text/babel" src="/static/js/hooks/useVMStatus.js?v=__ASSET_VER__"></script>
+            <script type="text/babel" src="/static/js/components/VMFallback.jsx?v=__ASSET_VER__"></script>
+            <script type="text/babel" src="/static/js/main_vm_wrapper.jsx?v=__ASSET_VER__"></script>
         </body>
     </html>
     '''
-        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name).replace('__JS_FAVICON__', json.dumps(fav_url))
+        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name).replace('__JS_FAVICON__', json.dumps(fav_url)).replace('__ASSET_VER__', asset_ver)
         resp = Response(page, mimetype='text/html')
         resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         resp.headers['Pragma'] = 'no-cache'
