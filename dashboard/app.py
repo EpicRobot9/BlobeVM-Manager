@@ -102,7 +102,9 @@ def api_v2status():
     return jsonify({'running': running, 'url': url})
 
 APP_ROOT = '/opt/blobe-vm'
-MANAGER = 'blobe-vm-manager'
+MANAGER = os.environ.get('BLOBEVM_MANAGER') or os.path.join(APP_ROOT, 'server', 'blobe-vm-manager')
+if not os.path.isfile(MANAGER):
+    MANAGER = 'blobe-vm-manager'
 HOST_DOCKER_BIN = os.environ.get('HOST_DOCKER_BIN') or '/usr/bin/docker'
 CONTAINER_DOCKER_BIN = os.environ.get('CONTAINER_DOCKER_BIN') or '/usr/bin/docker'
 DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
@@ -1334,9 +1336,20 @@ def _is_direct_mode():
 def _request_host():
     try:
         host = request.headers.get('X-Forwarded-Host') or request.host or ''
-        return (host.split(':')[0] if host else '')
+        return (host.split(',')[0].strip().split(':')[0] if host else '')
     except Exception:
         return ''
+
+
+def _external_base_url():
+    try:
+        proto = (request.headers.get('X-Forwarded-Proto') or request.scheme or 'http').split(',')[0].strip()
+        host = (request.headers.get('X-Forwarded-Host') or request.headers.get('Host') or request.host or '').split(',')[0].strip()
+        if host:
+            return f'{proto}://{host}'
+    except Exception:
+        pass
+    return ''
 
 def _vm_host_port(cname: str) -> str:
     try:
@@ -1899,14 +1912,15 @@ def api_upload_vm_favicon(name):
 def dashboard_vm_forward_auth(name):
     user = _current_portal_user()
     next_url = request.headers.get('X-Forwarded-Uri') or request.args.get('next') or f'/dashboard/vm/{name}/'
+    ext_base = _external_base_url()
     if not user:
-        login_url = '/portal/login?next=' + urlrequest.quote(next_url, safe='/:?=&%')
-        resp = Response('Unauthorized', 401)
-        resp.headers['Location'] = login_url
-        resp.headers['X-Portal-Login'] = login_url
-        return resp
+        login_path = '/portal/login?next=' + urlrequest.quote(next_url, safe='/:?=&%')
+        login_url = f'{ext_base}{login_path}' if ext_base else login_path
+        return Response('', 302, {'Location': login_url})
     if not _user_can_access_vm(user, name):
-        return Response('Forbidden', 403)
+        denied_path = '/dashboard/vm/' + urlrequest.quote(name, safe='') + '/'
+        denied_url = f'{ext_base}{denied_path}' if ext_base else denied_path
+        return Response('', 302, {'Location': denied_url})
     return Response('OK', 200)
 
 
