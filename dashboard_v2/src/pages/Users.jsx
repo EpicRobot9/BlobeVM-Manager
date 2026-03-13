@@ -75,6 +75,21 @@ export default function Users(){
     setBusy('')
   }
 
+  async function handleRequestAction(req, action){
+    setBusy(`request:${req.id}:${action}`)
+    try{
+      const r = await apiFetch(`/access-requests/${req.id}/action`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ action })
+      })
+      const j = await r.json().catch(()=>({ ok:r.ok }))
+      if(!r.ok || j.ok === false) throw new Error(j.error || `Failed to ${action} request`)
+      await load()
+    }catch(e){ alert(String(e)) }
+    setBusy('')
+  }
+
   const vmNames = useMemo(()=>vms.map(v=>v.name), [vms])
 
   return (
@@ -133,12 +148,27 @@ export default function Users(){
         <h2 style={{marginTop:0}}>Access requests</h2>
         {requests.length === 0 ? <div style={{color:'var(--muted)'}}>No requests yet.</div> : (
           <div style={{display:'grid', gap:10}}>
-            {requests.map(req => (
-              <div key={req.id} style={{border:'1px solid rgba(255,255,255,.08)', borderRadius:14, padding:14}}>
-                <strong>{req.username}</strong> requested <strong>{req.vm_name}</strong>
-                <div style={{color:'var(--muted)', marginTop:6}}>{req.note || 'No note provided.'}</div>
-              </div>
-            ))}
+            {requests.map(req => {
+              const requestBusyPrefix = `request:${req.id}:`
+              return (
+                <div key={req.id} style={{border:'1px solid rgba(255,255,255,.08)', borderRadius:14, padding:14}}>
+                  <div style={{display:'flex', justifyContent:'space-between', gap:12, flexWrap:'wrap', alignItems:'center'}}>
+                    <div>
+                      <strong>{req.username}</strong> requested <strong>{req.vm_name}</strong>
+                      <div style={{color:'var(--muted)', marginTop:6}}>Status: {req.status || 'pending'}</div>
+                    </div>
+                  </div>
+                  <div style={{color:'var(--muted)', marginTop:6}}>{req.note || 'No note provided.'}</div>
+                  {req.status === 'pending' ? (
+                    <div style={{display:'flex', gap:10, flexWrap:'wrap', marginTop:12}}>
+                      <Button onClick={()=>handleRequestAction(req, 'approve')} disabled={busy === requestBusyPrefix + 'approve'}>{busy === requestBusyPrefix + 'approve' ? 'Approving…' : 'Approve & grant access'}</Button>
+                      <Button onClick={()=>handleRequestAction(req, 'deny')} disabled={busy === requestBusyPrefix + 'deny'} style={{background:'linear-gradient(135deg,#f59e0b,#b45309)', color:'#fff'}}>{busy === requestBusyPrefix + 'deny' ? 'Denying…' : 'Deny'}</Button>
+                      <Button onClick={()=>handleRequestAction(req, 'dismiss')} disabled={busy === requestBusyPrefix + 'dismiss'} style={{background:'linear-gradient(135deg,#475569,#334155)', color:'#fff'}}>{busy === requestBusyPrefix + 'dismiss' ? 'Dismissing…' : 'Dismiss'}</Button>
+                    </div>
+                  ) : null}
+                </div>
+              )
+            })}
           </div>
         )}
       </div>

@@ -2036,6 +2036,35 @@ def dashboard_users_delete(username):
     ok = _delete_user(username)
     return jsonify({'ok': ok})
 
+@app.post('/dashboard/api/access-requests/<int:req_id>/action')
+@v2_auth_required
+def dashboard_access_request_action(req_id):
+    data = request.get_json(silent=True) or {}
+    action = str(data.get('action') or '').strip().lower()
+    if action not in ('approve', 'deny', 'dismiss'):
+        return jsonify({'ok': False, 'error': 'Invalid action'}), 400
+    conn = _users_conn()
+    try:
+        row = conn.execute('SELECT id, username, vm_name, note, status FROM access_requests WHERE id = ?', (req_id,)).fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'Request not found'}), 404
+        if action == 'approve':
+            user = _get_user_by_username(row['username'])
+            if not user:
+                return jsonify({'ok': False, 'error': 'User no longer exists'}), 404
+            assigned = sorted(set((user.get('assignedVms') or []) + [row['vm_name']]))
+            _update_user(row['username'], assigned_vms=assigned)
+            new_status = 'approved'
+        elif action == 'deny':
+            new_status = 'denied'
+        else:
+            new_status = 'dismissed'
+        conn.execute('UPDATE access_requests SET status = ? WHERE id = ?', (new_status, req_id))
+        conn.commit()
+        return jsonify({'ok': True, 'status': new_status, 'request': {'id': row['id'], 'username': row['username'], 'vm_name': row['vm_name']}})
+    finally:
+        conn.close()
+
 # --- Dashboard v2 auth routes (top-level) ---
 @app.post('/Dashboard/api/auth/login')
 def dashboard_v2_login_public():
