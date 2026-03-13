@@ -47,4 +47,10 @@
     const body = await readJson(res);
     return { ok: !!(res.ok && body && body.ok), status: res.status, body };
   };
+
+  window.api.logoutPortal = async function(){
+    const res = await fetch('/portal/api/auth/logout', { method:'POST' });
+    const body = await readJson(res);
+    return { ok: !!(res.ok && body && body.ok), status: res.status, body };
+  };
 })();

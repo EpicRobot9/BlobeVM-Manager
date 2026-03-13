@@ -13,6 +13,7 @@
     const [actionMsg, setActionMsg] = React.useState('');
     const [actionTone, setActionTone] = React.useState('ok');
     const [stopBusy, setStopBusy] = React.useState(false);
+    const [logoutBusy, setLogoutBusy] = React.useState(false);
     const startMsRef = React.useRef(Date.now());
     const readySinceRef = React.useRef(null);
     const closeTimerRef = React.useRef(null);
@@ -90,6 +91,21 @@
       setStopBusy(false);
     }
 
+    async function logoutPortal(){
+      if(logoutBusy) return;
+      setLogoutBusy(true);
+      setActionMsg('');
+      try {
+        const res = await window.api.logoutPortal();
+        if(!res.ok) throw new Error((res.body && (res.body.error || res.body.message)) || `HTTP ${res.status}`);
+        window.location.href = '/portal/login?next=' + encodeURIComponent(window.location.pathname + window.location.search);
+      } catch (e) {
+        setActionTone('err');
+        setActionMsg(String(e));
+      }
+      setLogoutBusy(false);
+    }
+
     React.useEffect(()=>{
       let cancelled = false;
       async function check(){
@@ -142,6 +158,12 @@
 
     const readyForReveal = !!(vm && vm.running && iframeReady && frameLoaded && (Date.now() - startMsRef.current >= MIN_LOADING_MS));
     const controls = React.createElement(React.Fragment, null,
+      !panelOpen ? React.createElement('button', {
+        className:'vm-controls-handle',
+        type:'button',
+        onClick: openPanel,
+        title:'Open VM controls'
+      }, '≡') : null,
       React.createElement('div', { className:'vm-controls-shell' },
         panelMounted ? React.createElement('div', { className:`vm-controls-panel ${panelOpen ? 'open' : 'closed'}` },
           React.createElement('div', { className:'vm-controls-title' }, 'VM Controls'),
@@ -149,6 +171,7 @@
           React.createElement('div', { className:'vm-controls-row' },
             React.createElement('button', { className:'btn btn-danger', onClick: stopVm, disabled: stopBusy || !(vm && vm.running) }, stopBusy ? 'Stopping…' : ((vm && vm.running) ? 'Stop VM' : 'VM already stopped')),
             React.createElement('button', { className:'btn btn-secondary', onClick: ()=>{ window.location.href = '/portal'; } }, 'Open Portal'),
+            React.createElement('button', { className:'btn btn-secondary', onClick: logoutPortal, disabled: logoutBusy }, logoutBusy ? 'Logging out…' : 'Log out'),
             React.createElement('button', { className:'btn btn-ghost', onClick: closePanel }, 'Close')
           ),
           actionMsg ? React.createElement('div', { className:`vm-toast ${actionTone}` }, actionMsg) : null

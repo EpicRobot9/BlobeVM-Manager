@@ -2333,6 +2333,8 @@ def dashboard_vm_wrapper(name):
                 body{font-family:Inter,system-ui,Arial,sans-serif;background:radial-gradient(circle at top,#101933 0%,#050816 58%,#03050d 100%);color:var(--text);overflow:hidden}
                 .vm-iframe{position:fixed;inset:0;width:100%;height:100%;border:none;background:#000}
                 .vm-hotkey-hint{position:fixed;right:20px;bottom:18px;z-index:40;padding:10px 14px;border-radius:999px;background:rgba(5,8,22,.72);border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(14px);color:#dbeafe;font-size:12px;letter-spacing:.02em;box-shadow:0 16px 40px rgba(0,0,0,.35);opacity:.9;pointer-events:none;transition:opacity .2s ease, transform .2s ease}
+                .vm-controls-handle{position:fixed;top:20px;right:20px;z-index:58;width:48px;height:48px;border-radius:16px;border:1px solid rgba(255,255,255,.14);background:linear-gradient(180deg,rgba(12,18,38,.92),rgba(5,8,22,.95));color:#eef4ff;display:flex;align-items:center;justify-content:center;font-size:21px;font-weight:900;cursor:pointer;box-shadow:0 18px 40px rgba(0,0,0,.36);backdrop-filter:blur(18px);transition:transform .18s ease, box-shadow .18s ease, opacity .18s ease}
+                .vm-controls-handle:hover{transform:translateY(-1px);box-shadow:0 22px 50px rgba(0,0,0,.44)}
                 .vm-controls-shell{position:fixed;top:24px;right:24px;z-index:60;pointer-events:none}
                 .vm-controls-panel{width:min(420px,calc(100vw - 32px));padding:18px;border-radius:22px;border:1px solid rgba(255,255,255,.12);background:linear-gradient(180deg,rgba(10,16,34,.88),rgba(6,10,22,.92));backdrop-filter:blur(24px);box-shadow:0 24px 80px rgba(0,0,0,.42);color:var(--text);pointer-events:auto;transform-origin:top right;transition:opacity .2s ease, transform .2s ease}
                 .vm-controls-panel.open{opacity:1;transform:translateY(0) scale(1)}
@@ -2379,7 +2381,7 @@ def dashboard_vm_wrapper(name):
                 .tone-down .status-pill{border-color:rgba(245,158,11,.25);color:#ffe8ba}
                 .tone-live .status-pill{border-color:rgba(34,197,94,.25);color:#dcfce7}
                 @keyframes spin{to{transform:rotate(360deg)}}
-                @media (max-width: 720px){.fallback{padding:16px}.hero-card{padding:20px;border-radius:22px}.actions{flex-direction:column}.btn{width:100%}.hero-subtitle{font-size:15px}.vm-controls-shell{top:12px;right:12px;left:12px}.vm-controls-panel{width:auto}.vm-hotkey-hint{left:12px;right:12px;bottom:12px;text-align:center}}
+                @media (max-width: 720px){.fallback{padding:16px}.hero-card{padding:20px;border-radius:22px}.actions{flex-direction:column}.btn{width:100%}.hero-subtitle{font-size:15px}.vm-controls-shell{top:12px;right:12px;left:12px}.vm-controls-panel{width:auto}.vm-hotkey-hint{left:12px;right:12px;bottom:12px;text-align:center}.vm-controls-handle{top:12px;right:12px;width:46px;height:46px;border-radius:14px}}
             </style>
         </head>
         <body>
