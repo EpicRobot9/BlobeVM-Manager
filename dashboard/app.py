@@ -1952,14 +1952,28 @@ def portal_auth_status_api():
 @portal_auth_required
 def portal_vms_api():
     user = request.portal_user
-    assigned = set(user.get('assignedVms') or [])
+    assigned = _normalize_vm_names(user.get('assignedVms') or [])
     vms = []
-    for vm in manager_json_list():
-        if vm.get('name') in assigned or _vm_access_mode(vm.get('name')) == 'public':
-            item = dict(vm)
-            item['accessMode'] = _vm_access_mode(vm.get('name'))
-            item['allowed'] = _user_can_access_vm(user, vm.get('name'))
-            vms.append(item)
+    for name in assigned:
+        try:
+            status = _vm_status_payload(name)
+        except Exception:
+            status = {'ok': False, 'name': name, 'status': 'unknown', 'state': 'unknown', 'running': False, 'healthy': False, 'crashed': False, 'exists': False}
+        item = {
+            'name': name,
+            'url': _build_vm_url(name),
+            'accessMode': _vm_access_mode(name),
+            'allowed': True,
+            'status': status.get('status') or status.get('state') or 'Unknown',
+            'state': status.get('state') or 'unknown',
+            'running': bool(status.get('running')),
+            'healthy': bool(status.get('healthy')),
+            'crashed': bool(status.get('crashed')),
+            'exists': bool(status.get('exists', True)),
+            'recoveryState': status.get('recoveryState') or 'healthy',
+            'profile': status.get('profile') or 'desktop',
+        }
+        vms.append(item)
     return jsonify({'ok': True, 'user': {k:v for k,v in user.items() if k != 'password_hash'}, 'vms': vms})
 
 @app.post('/portal/api/start/<name>')
