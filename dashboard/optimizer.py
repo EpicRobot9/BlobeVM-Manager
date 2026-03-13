@@ -663,9 +663,13 @@ def _health_probe_urls(name: str, advertised_url: str):
         local_path = '/' + local_path
     if not local_path.endswith('/'):
         local_path += '/'
-    scheme = 'https' if str(os.environ.get('ENABLE_TLS', '0')) == '1' else 'http'
-    urls.append(f'{scheme}://127.0.0.1{local_path}')
-    urls.append(f'{scheme}://172.18.0.1{local_path}')
+    schemes = ['https', 'http']
+    primary_scheme = 'https' if str(os.environ.get('ENABLE_TLS', '0')) == '1' else 'http'
+    if primary_scheme in schemes:
+        schemes = [primary_scheme] + [s for s in schemes if s != primary_scheme]
+    for scheme in schemes:
+        urls.append(f'{scheme}://127.0.0.1{local_path}')
+        urls.append(f'{scheme}://172.18.0.1{local_path}')
     return urls
 
 
