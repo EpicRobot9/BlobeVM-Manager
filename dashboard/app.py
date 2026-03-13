@@ -4,7 +4,7 @@ import shutil
 import re
 from urllib import request as urlrequest, error as urlerror
 from functools import wraps
-from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
+from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file
 import optimizer as dash_optimizer
 import hmac, hashlib, time, base64
 try:
@@ -1000,6 +1000,34 @@ def _set_instance_meta(name: str, key: str, value):
         json.dump(data, f, indent=2)
     return data
 
+
+def _guess_icon_mimetype(path: str) -> str:
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(16)
+        if header.startswith(b'\x89PNG\r\n\x1a\n'):
+            return 'image/png'
+        if header.startswith(b'\xff\xd8\xff'):
+            return 'image/jpeg'
+        if header[:4] == b'RIFF' and header[8:12] == b'WEBP':
+            return 'image/webp'
+        if header.startswith(b'GIF87a') or header.startswith(b'GIF89a'):
+            return 'image/gif'
+        if header[:4] == b'\x00\x00\x01\x00':
+            return 'image/x-icon'
+    except Exception:
+        pass
+    return 'application/octet-stream'
+
+
+def _send_icon_file(path: str):
+    mimetype = _guess_icon_mimetype(path)
+    resp = send_file(path, mimetype=mimetype, conditional=False)
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
+
 def _flag_path(name: str, flag: str) -> str:
     return os.path.join(_inst_dir(), name, f'.{flag}')
 
@@ -1477,11 +1505,7 @@ def dashboard_favicon():
     # Serve a saved favicon if present under state_dir/dashboard/favicon.ico
     fav_path = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
     if os.path.isfile(fav_path):
-        resp = send_from_directory(os.path.dirname(fav_path), os.path.basename(fav_path))
-        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        resp.headers['Pragma'] = 'no-cache'
-        resp.headers['Expires'] = '0'
-        return resp
+        return _send_icon_file(fav_path)
     # If no local file, try to redirect to configured favicon URL
     cfg = _load_dashboard_settings()
     if cfg.get('favicon'):
@@ -1805,11 +1829,7 @@ def dashboard_vm_favicon(name):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', name)
     candidate = os.path.join(ddir, f"{safe}.ico")
     if os.path.isfile(candidate):
-        resp = send_from_directory(ddir, os.path.basename(candidate))
-        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        resp.headers['Pragma'] = 'no-cache'
-        resp.headers['Expires'] = '0'
-        return resp
+        return _send_icon_file(candidate)
     # fallback to global favicon route
     return '', 302, {'Location': '/dashboard/favicon.ico', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0'}
 
