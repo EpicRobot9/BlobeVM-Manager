@@ -1477,11 +1477,15 @@ def dashboard_favicon():
     # Serve a saved favicon if present under state_dir/dashboard/favicon.ico
     fav_path = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
     if os.path.isfile(fav_path):
-        return send_from_directory(os.path.dirname(fav_path), os.path.basename(fav_path))
+        resp = send_from_directory(os.path.dirname(fav_path), os.path.basename(fav_path))
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        return resp
     # If no local file, try to redirect to configured favicon URL
     cfg = _load_dashboard_settings()
     if cfg.get('favicon'):
-        return '', 302, {'Location': cfg.get('favicon')}
+        return '', 302, {'Location': cfg.get('favicon'), 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0'}
     # Not found
     abort(404)
 
@@ -1801,9 +1805,13 @@ def dashboard_vm_favicon(name):
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', name)
     candidate = os.path.join(ddir, f"{safe}.ico")
     if os.path.isfile(candidate):
-        return send_from_directory(ddir, os.path.basename(candidate))
+        resp = send_from_directory(ddir, os.path.basename(candidate))
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        return resp
     # fallback to global favicon route
-    return '', 302, {'Location': '/dashboard/favicon.ico'}
+    return '', 302, {'Location': '/dashboard/favicon.ico', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0'}
 
 
 @app.get('/dashboard/vm/<name>/')
