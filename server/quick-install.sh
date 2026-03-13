@@ -3,7 +3,7 @@ set -euo pipefail
 
 # One-line installer for BlobeVM on a fresh server
 # Usage:
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/server/quick-install.sh)"
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/server/quick-install.sh)"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Re-running as root..."
@@ -18,17 +18,22 @@ mkdir -p "$TMP_DIR"
 cd "$TMP_DIR"
 
 echo "Cloning BlobeVM repo..."
-git clone --depth 1 https://github.com/EpicRobot9/BlobeVM.git repo
+git clone --depth 1 https://github.com/EpicRobot9/BlobeVM-Manager.git repo
 cd repo
 
-echo "Running installer..."
+echo "Running installer in one-shot onboarding mode..."
+: "${BLOBEVM_ASSUME_DEFAULTS:=1}"
+: "${BLOBEVM_ENABLE_DASHBOARD:=1}"
+: "${BLOBEVM_AUTO_CREATE_VM:=1}"
+: "${BLOBEVM_INITIAL_VM_NAME:=testvm}"
+export BLOBEVM_ASSUME_DEFAULTS BLOBEVM_ENABLE_DASHBOARD BLOBEVM_AUTO_CREATE_VM BLOBEVM_INITIAL_VM_NAME
 bash server/install.sh
 
 echo "Cleaning up temp directory..."
 cd /
 rm -rf "$TMP_DIR"
 
-echo "Done. Use 'blobe-vm-manager create <name>' to make your first VM."
+echo "Done. One-shot onboarding finished."
 if command -v blobe-vm-manager >/dev/null 2>&1; then
   echo
   echo "Current VMs:"

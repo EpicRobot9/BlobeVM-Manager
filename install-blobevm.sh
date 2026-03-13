@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 SCRIPT_NAME="${0##*/}"
 BRANCH="${BLOBEVM_BRANCH:-main}"
-REPO_URL="${BLOBEVM_REPO_URL:-https://github.com/EpicRobot9/BlobeVM.git}"
+REPO_URL="${BLOBEVM_REPO_URL:-https://github.com/EpicRobot9/BlobeVM-Manager.git}"
 INSTALL_ROOT="${BLOBEVM_ROOT:-/opt/blobe-vm}"
 REPO_DIR="${INSTALL_ROOT}/repo"
 INSTALLER_REL="server/install.sh"

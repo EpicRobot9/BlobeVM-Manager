@@ -1494,13 +1494,21 @@ print_success() {
     dport="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | awk '/^blobedash / {print $2}' | sed -E 's/.*:([0-9]+)->5000.*/\1/' | head -n1)"
   fi
 
+  local base_host old_dashboard_url dashboard_v2_url test_vm_name test_vm_url scheme
+  scheme="http"
+  [[ "${TLS_ENABLED:-0}" -eq 1 ]] && scheme="https"
   if [[ -n "${BLOBEVM_DOMAIN:-}" && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
-    # Dashboard always runs in direct mode
-    if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "$dport" ]]; then
-      echo "- Dashboard (direct): http://${ip}:${dport}/dashboard"
-    else
-      echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
-    fi
+    base_host="${BLOBEVM_DOMAIN}"
+  else
+    base_host="${ip}"
+  fi
+  old_dashboard_url=""
+  dashboard_v2_url=""
+  if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "$dport" ]]; then
+    old_dashboard_url="http://${ip}:${dport}/dashboard"
+    dashboard_v2_url="http://${ip}:${dport}/Dashboard"
+  fi
+  if [[ -n "${BLOBEVM_DOMAIN:-}" && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
     if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
       echo "- Traefik:  https://traefik.${BLOBEVM_DOMAIN}${https_suffix}/"
       echo "- VM URLs:  https://<name>.${BLOBEVM_DOMAIN}${https_suffix}/ (path fallback ${base_path}/<name>/)"
@@ -1513,13 +1521,25 @@ print_success() {
       echo "  (Using path-based routing. Live now: http://${BLOBEVM_DOMAIN}${http_suffix}${base_path}/<name>/ and http://${BLOBEVM_DOMAIN}${http_suffix}/traefik/)"
     fi
   else
-    if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "$dport" ]]; then
-      echo "- Dashboard: http://${ip}:${dport}/dashboard"
-    else
-      echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
-    fi
     echo "- VM URLs: http://<SERVER_IP>${http_suffix}${base_path}/<name>/"
     [[ "${TLS_ENABLED:-0}" -eq 1 ]] && echo "- VM URLs (HTTPS): https://<SERVER_IP>${https_suffix}${base_path}/<name>/"
+  fi
+  if [[ -n "$old_dashboard_url" ]]; then
+    echo "- Dashboard v2: ${dashboard_v2_url}"
+    echo "- Old dashboard: ${old_dashboard_url}"
+  else
+    echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
+  fi
+  test_vm_name="${BLOBEVM_INITIAL_VM_NAME:-testvm}"
+  if [[ -d "/opt/blobe-vm/instances/${test_vm_name}" ]]; then
+    if command -v blobe-vm-manager >/dev/null 2>&1; then
+      test_vm_url="$(blobe-vm-manager url "${test_vm_name}" 2>/dev/null || true)"
+    fi
+    if [[ -n "$test_vm_url" ]]; then
+      echo "- Test VM (${test_vm_name}): ${test_vm_url}"
+    else
+      echo "- Test VM (${test_vm_name}): ${scheme}://${base_host}${http_suffix}${base_path}/${test_vm_name}/"
+    fi
   fi
   echo "- Manage VMs: blobe-vm-manager [list|create|start|stop|delete|rename] <name>"
   echo "- Uninstall everything: blobe-vm-manager nuke"

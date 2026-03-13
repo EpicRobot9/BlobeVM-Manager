@@ -6,7 +6,7 @@ Start a new blank codespace by going to https://github.com/codespaces/ and choos
 
 For a full description of the new modern dashboard (Dashboard v2), see `docs/DASHBOARD_V2.md` which documents pages, server endpoints, installer behavior, build instructions, environment variables, and troubleshooting tips.
 
-curl -O https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/install.sh
+curl -O https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/install.sh
 chmod +x install.sh
 ./install.sh
 ```
@@ -22,14 +22,28 @@ What you'll get:
 - A web dashboard (auto-deployed) at `/dashboard` (and optionally `dashboard.<your-domain>`)
 
 ### 1) Quick one-line install
-Run this on your server to clone the repo and start the guided installer:
+Run this on your server to clone the repo and start the one-shot installer:
 ```
-curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/install-blobevm.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/install-blobevm.sh | sudo bash
+```
+
+By default, the quick installer now:
+- accepts safe defaults for a fresh setup
+- deploys both dashboard UIs
+- creates a starter VM named `testvm`
+- prints direct links for:
+  - Dashboard v2
+  - Old dashboard
+  - Test VM
+
+Override the default starter VM name if you want:
+```
+curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/install-blobevm.sh | sudo BLOBEVM_INITIAL_VM_NAME=alpha bash
 ```
 
 Need to avoid Traefik and any currently allocated ports? Use direct mode (no proxy):
 ```
-curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/install-blobevm.sh | sudo BLOBEVM_NO_TRAEFIK=1 BLOBEVM_ENABLE_DASHBOARD=1 BLOBEVM_DIRECT_PORT_START=20000 bash
+curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/install-blobevm.sh | sudo BLOBEVM_NO_TRAEFIK=1 BLOBEVM_ENABLE_DASHBOARD=1 BLOBEVM_DIRECT_PORT_START=20000 bash
 ```
 In direct mode, each VM is exposed on a unique high port automatically (starting at BLOBEVM_DIRECT_PORT_START, default 20000). The CLI prints the exact URL (for example, http://<server-ip>:20017/). The dashboard, if enabled, is served directly on another free high port.
 
@@ -44,7 +58,8 @@ The installer will:
 - Build the BlobeVM image
 - Install the `blobe-vm-manager` CLI
 - Deploy the web dashboard automatically (set `DISABLE_DASHBOARD=1` before running to skip). In direct mode the dashboard is published on a free high port.
-- Optionally create your first VM and print its URL
+- Automatically create a starter VM (`testvm` by default in quick-install mode)
+- Print ready-to-open links for Dashboard v2, the old dashboard, and the starter VM
 
 Notes during install:
 - If ports 80/443 are already in use on the host, the installer will show which process is using the port and ask whether to kill it or switch to another port (auto-picking from 8080/8443 upward when you choose switch). In that case, URLs will include the chosen port (e.g., http://<server-ip>:8880/vm/<name>/). The CLI output reflects the correct port.

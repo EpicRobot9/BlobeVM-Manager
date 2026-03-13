@@ -1,5 +1,5 @@
-git clone https://github.com/EpicRobot9/BlobeVM
-cd BlobeVM
+git clone https://github.com/EpicRobot9/BlobeVM-Manager.git BlobeVM-Manager
+cd BlobeVM-Manager
 pip install textual
 sleep 2
 python3 installer.py
@@ -10,9 +10,9 @@ sudo apt update
 sudo apt install -y jq
 
 mkdir Save
-cp -r BlobeVM/root/config/* Save
+cp -r BlobeVM-Manager/root/config/* Save
 
-json_file="BlobeVM/options.json"
+json_file="BlobeVM-Manager/options.json"
 if jq ".enablekvm" "$json_file" | grep -q true; then
     docker run -d --name=BlobeVM -e PUID=1000 -e PGID=1000 --device=/dev/kvm --security-opt seccomp=unconfined -e TZ=Etc/UTC -e SUBFOLDER=/ -e TITLE=BlobeVM -p 3000:3000 --shm-size="2gb" -v $(pwd)/Save:/config --restart unless-stopped blobevm
 else
@@ -76,7 +76,7 @@ if [[ (! -d /opt/blobe-vm/optimizer) ]]; then
         echo "Optimizer not found locally; cloning repo from GitHub to retrieve optimizer"
         TMP_CLONE="/tmp/BlobeVM_installer_$$"
         rm -rf "$TMP_CLONE"
-        git clone --depth 1 https://github.com/EpicRobot9/BlobeVM "$TMP_CLONE" || true
+        git clone --depth 1 https://github.com/EpicRobot9/BlobeVM-Manager.git "$TMP_CLONE" || true
         if [[ -d "$TMP_CLONE/optimizer" ]]; then
             sudo mkdir -p /opt/blobe-vm/optimizer
             sudo rsync -a "$TMP_CLONE/optimizer/" /opt/blobe-vm/optimizer/
