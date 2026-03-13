@@ -41,4 +41,10 @@
     const body = await readJson(res);
     return { ok: !!(res.ok && body && body.ok), status: res.status, body };
   };
+
+  window.api.stopVMViaPortal = async function(vmname){
+    const res = await fetch(`/portal/api/stop/${encodeURIComponent(vmname)}`, { method:'POST' });
+    const body = await readJson(res);
+    return { ok: !!(res.ok && body && body.ok), status: res.status, body };
+  };
 })();

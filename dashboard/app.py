@@ -2332,6 +2332,17 @@ def dashboard_vm_wrapper(name):
                 html,body,#root{height:100%;margin:0}
                 body{font-family:Inter,system-ui,Arial,sans-serif;background:radial-gradient(circle at top,#101933 0%,#050816 58%,#03050d 100%);color:var(--text);overflow:hidden}
                 .vm-iframe{position:fixed;inset:0;width:100%;height:100%;border:none;background:#000}
+                .vm-hotkey-hint{position:fixed;right:20px;bottom:18px;z-index:40;padding:10px 14px;border-radius:999px;background:rgba(5,8,22,.72);border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(14px);color:#dbeafe;font-size:12px;letter-spacing:.02em;box-shadow:0 16px 40px rgba(0,0,0,.35);opacity:.9;pointer-events:none;transition:opacity .2s ease, transform .2s ease}
+                .vm-controls-shell{position:fixed;top:24px;right:24px;z-index:60;pointer-events:none}
+                .vm-controls-panel{width:min(420px,calc(100vw - 32px));padding:18px;border-radius:22px;border:1px solid rgba(255,255,255,.12);background:linear-gradient(180deg,rgba(10,16,34,.88),rgba(6,10,22,.92));backdrop-filter:blur(24px);box-shadow:0 24px 80px rgba(0,0,0,.42);color:var(--text);pointer-events:auto;transform-origin:top right;transition:opacity .2s ease, transform .2s ease}
+                .vm-controls-panel.open{opacity:1;transform:translateY(0) scale(1)}
+                .vm-controls-panel.closed{opacity:0;transform:translateY(-10px) scale(.96);pointer-events:none}
+                .vm-controls-title{font-size:16px;font-weight:800;margin:0 0 6px}
+                .vm-controls-copy{font-size:13px;color:var(--muted);line-height:1.45;margin-bottom:14px}
+                .vm-controls-row{display:flex;flex-wrap:wrap;gap:10px}
+                .vm-toast{margin-top:12px;padding:10px 12px;border-radius:14px;font-size:13px;line-height:1.4;border:1px solid rgba(255,255,255,.08)}
+                .vm-toast.ok{background:rgba(22,101,52,.35);color:#dcfce7}
+                .vm-toast.err{background:rgba(127,29,29,.45);color:#ffe4e6}
                 .fallback{display:flex;align-items:center;justify-content:center;height:100%;padding:28px;background:radial-gradient(circle at 20% 20%,rgba(94,162,255,.12),transparent 35%),radial-gradient(circle at 80% 0%,rgba(124,58,237,.12),transparent 28%),linear-gradient(180deg,var(--bg2),var(--bg));color:var(--text)}
                 .shell{width:min(100%,1040px);position:relative}
                 .status-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:rgba(255,255,255,.05);padding:10px 14px;border-radius:999px;font-size:13px;color:#dbeafe;backdrop-filter:blur(16px);margin-bottom:18px;box-shadow:0 12px 30px rgba(0,0,0,.25)}
@@ -2368,7 +2379,7 @@ def dashboard_vm_wrapper(name):
                 .tone-down .status-pill{border-color:rgba(245,158,11,.25);color:#ffe8ba}
                 .tone-live .status-pill{border-color:rgba(34,197,94,.25);color:#dcfce7}
                 @keyframes spin{to{transform:rotate(360deg)}}
-                @media (max-width: 720px){.fallback{padding:16px}.hero-card{padding:20px;border-radius:22px}.actions{flex-direction:column}.btn{width:100%}.hero-subtitle{font-size:15px}}
+                @media (max-width: 720px){.fallback{padding:16px}.hero-card{padding:20px;border-radius:22px}.actions{flex-direction:column}.btn{width:100%}.hero-subtitle{font-size:15px}.vm-controls-shell{top:12px;right:12px;left:12px}.vm-controls-panel{width:auto}.vm-hotkey-hint{left:12px;right:12px;bottom:12px;text-align:center}}
             </style>
         </head>
         <body>

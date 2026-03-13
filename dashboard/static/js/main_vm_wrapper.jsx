@@ -8,8 +8,14 @@
     const vm = window.useVMStatus(init.vmname, { interval: 1600 });
     const [iframeReady, setIframeReady] = React.useState(false);
     const [frameLoaded, setFrameLoaded] = React.useState(false);
+    const [panelOpen, setPanelOpen] = React.useState(false);
+    const [panelMounted, setPanelMounted] = React.useState(false);
+    const [actionMsg, setActionMsg] = React.useState('');
+    const [actionTone, setActionTone] = React.useState('ok');
+    const [stopBusy, setStopBusy] = React.useState(false);
     const startMsRef = React.useRef(Date.now());
     const readySinceRef = React.useRef(null);
+    const closeTimerRef = React.useRef(null);
 
     React.useEffect(()=>{
       if(!(vm && vm.running)){
@@ -27,6 +33,62 @@
       frame.addEventListener('load', onLoad);
       return ()=> frame.removeEventListener('load', onLoad);
     }, []);
+
+    const closePanel = React.useCallback(()=>{
+      setPanelOpen(false);
+      if(closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = window.setTimeout(()=>{
+        setPanelMounted(false);
+        closeTimerRef.current = null;
+      }, 220);
+    }, []);
+
+    const openPanel = React.useCallback(()=>{
+      if(closeTimerRef.current){
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+      setPanelMounted(true);
+      window.requestAnimationFrame(()=> setPanelOpen(true));
+    }, []);
+
+    const togglePanel = React.useCallback(()=>{
+      if(panelOpen) closePanel();
+      else openPanel();
+    }, [panelOpen, openPanel, closePanel]);
+
+    React.useEffect(()=>()=>{
+      if(closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    }, []);
+
+    React.useEffect(()=>{
+      function onKeyDown(e){
+        const tag = (e.target && e.target.tagName) ? String(e.target.tagName).toLowerCase() : '';
+        if(tag === 'input' || tag === 'textarea' || (e.target && e.target.isContentEditable)) return;
+        if(e.ctrlKey && e.shiftKey && e.key === '.'){
+          e.preventDefault();
+          togglePanel();
+        }
+      }
+      window.addEventListener('keydown', onKeyDown);
+      return ()=> window.removeEventListener('keydown', onKeyDown);
+    }, [togglePanel]);
+
+    async function stopVm(){
+      if(stopBusy) return;
+      setStopBusy(true);
+      setActionMsg('');
+      try {
+        const res = await window.api.stopVMViaPortal(init.vmname);
+        if(!res.ok) throw new Error((res.body && (res.body.error || res.body.message)) || `HTTP ${res.status}`);
+        setActionTone('ok');
+        setActionMsg('Stop request sent. The VM should shut down in a moment.');
+      } catch (e) {
+        setActionTone('err');
+        setActionMsg(String(e));
+      }
+      setStopBusy(false);
+    }
 
     React.useEffect(()=>{
       let cancelled = false;
@@ -79,8 +141,26 @@
     }, [vm && vm.running, iframeReady, frameLoaded, init.vmurl]);
 
     const readyForReveal = !!(vm && vm.running && iframeReady && frameLoaded && (Date.now() - startMsRef.current >= MIN_LOADING_MS));
-    if(readyForReveal) return null;
-    return React.createElement(window.VMFallback, { vmname:init.vmname, vmurl:init.vmurl, iframeReady: iframeReady && frameLoaded });
+    const controls = React.createElement(React.Fragment, null,
+      React.createElement('div', { className:'vm-controls-shell' },
+        panelMounted ? React.createElement('div', { className:`vm-controls-panel ${panelOpen ? 'open' : 'closed'}` },
+          React.createElement('div', { className:'vm-controls-title' }, 'VM Controls'),
+          React.createElement('div', { className:'vm-controls-copy' }, 'Press Ctrl + Shift + . to toggle this panel. Use it when you want quick wrapper controls without leaving the VM.'),
+          React.createElement('div', { className:'vm-controls-row' },
+            React.createElement('button', { className:'btn btn-danger', onClick: stopVm, disabled: stopBusy || !(vm && vm.running) }, stopBusy ? 'Stopping…' : ((vm && vm.running) ? 'Stop VM' : 'VM already stopped')),
+            React.createElement('button', { className:'btn btn-secondary', onClick: ()=>{ window.location.href = '/portal'; } }, 'Open Portal'),
+            React.createElement('button', { className:'btn btn-ghost', onClick: closePanel }, 'Close')
+          ),
+          actionMsg ? React.createElement('div', { className:`vm-toast ${actionTone}` }, actionMsg) : null
+        ) : null
+      ),
+      !panelOpen ? React.createElement('div', { className:'vm-hotkey-hint' }, 'Ctrl + Shift + . for VM controls') : null
+    );
+
+    return React.createElement(React.Fragment, null,
+      controls,
+      readyForReveal ? null : React.createElement(window.VMFallback, { vmname:init.vmname, vmurl:init.vmurl, iframeReady: iframeReady && frameLoaded })
+    );
   }
 
   try {
