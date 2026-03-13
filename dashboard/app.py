@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-import os, json, subprocess, shlex, base64, socket, threading, time
+import os, json, subprocess, shlex, base64, socket, threading, time, sqlite3, secrets
 import shutil
 import re
 from urllib import request as urlrequest, error as urlerror
 from functools import wraps
-from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file
+from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file, redirect
 import optimizer as dash_optimizer
 import hmac, hashlib, time, base64
 try:
@@ -961,6 +961,249 @@ def v2_auth_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+# --- Portal / per-VM user auth helpers ---
+_PORTAL_SECRET = os.environ.get('BLOBEVM_USER_SECRET') or _DASH_V2_SECRET
+
+def _users_db_path():
+    return os.path.join(_state_dir(), 'dashboard_users.sqlite3')
+
+def _users_conn():
+    conn = sqlite3.connect(_users_db_path())
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _init_users_db():
+    conn = _users_conn()
+    try:
+        conn.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            disabled INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        CREATE TABLE IF NOT EXISTS user_vm_access (
+            user_id INTEGER NOT NULL,
+            vm_name TEXT NOT NULL,
+            PRIMARY KEY (user_id, vm_name),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS access_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            vm_name TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        ''')
+        conn.commit()
+    finally:
+        conn.close()
+
+def _hash_user_password(password: str, salt: str | None = None) -> str:
+    if salt is None:
+        salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 260000)
+    return f"pbkdf2_sha256${salt}${base64.b64encode(dk).decode('ascii')}"
+
+def _verify_user_password(password: str, stored: str) -> bool:
+    try:
+        algo, salt, digest = stored.split('$', 2)
+        if algo != 'pbkdf2_sha256':
+            return False
+        actual = _hash_user_password(password, salt).split('$', 2)[2]
+        return hmac.compare_digest(actual, digest)
+    except Exception:
+        return False
+
+def _normalize_vm_names(vms):
+    out = []
+    seen = set()
+    for vm in (vms or []):
+        name = str(vm or '').strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+def _user_row_to_dict(row, vm_names=None):
+    return {
+        'id': row['id'],
+        'username': row['username'],
+        'isAdmin': bool(row['is_admin']),
+        'disabled': bool(row['disabled']),
+        'createdAt': int(row['created_at'] or 0),
+        'assignedVms': sorted(_normalize_vm_names(vm_names or [])),
+    }
+
+def _list_users():
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        rows = conn.execute('SELECT * FROM users ORDER BY username COLLATE NOCASE').fetchall()
+        access = conn.execute('SELECT user_id, vm_name FROM user_vm_access ORDER BY vm_name COLLATE NOCASE').fetchall()
+        vm_map = {}
+        for r in access:
+            vm_map.setdefault(r['user_id'], []).append(r['vm_name'])
+        return [_user_row_to_dict(r, vm_map.get(r['id'], [])) for r in rows]
+    finally:
+        conn.close()
+
+def _get_user_by_username(username: str):
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        row = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        if not row:
+            return None
+        vms = [r['vm_name'] for r in conn.execute('SELECT vm_name FROM user_vm_access WHERE user_id = ? ORDER BY vm_name COLLATE NOCASE', (row['id'],)).fetchall()]
+        return _user_row_to_dict(row, vms) | { 'password_hash': row['password_hash'] }
+    finally:
+        conn.close()
+
+def _create_user(username: str, password: str, assigned_vms=None, is_admin: bool=False):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}', username or ''):
+        raise ValueError('Username must be 3-64 chars using letters, numbers, dot, underscore, or dash')
+    if not password or len(password) < 4:
+        raise ValueError('Password must be at least 4 characters')
+    assigned_vms = _normalize_vm_names(assigned_vms)
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        cur = conn.execute('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)', (username, _hash_user_password(password), 1 if is_admin else 0))
+        uid = cur.lastrowid
+        conn.executemany('INSERT OR IGNORE INTO user_vm_access (user_id, vm_name) VALUES (?, ?)', [(uid, vm) for vm in assigned_vms])
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise ValueError('Username already exists')
+    finally:
+        conn.close()
+    return _get_user_by_username(username)
+
+def _update_user(username: str, assigned_vms=None, password=None, disabled=None):
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        row = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        if not row:
+            raise ValueError('User not found')
+        if password is not None:
+            if len(password) < 4:
+                raise ValueError('Password must be at least 4 characters')
+            conn.execute('UPDATE users SET password_hash = ? WHERE id = ?', (_hash_user_password(password), row['id']))
+        if disabled is not None:
+            conn.execute('UPDATE users SET disabled = ? WHERE id = ?', (1 if disabled else 0, row['id']))
+        if assigned_vms is not None:
+            assigned_vms = _normalize_vm_names(assigned_vms)
+            conn.execute('DELETE FROM user_vm_access WHERE user_id = ?', (row['id'],))
+            conn.executemany('INSERT OR IGNORE INTO user_vm_access (user_id, vm_name) VALUES (?, ?)', [(row['id'], vm) for vm in assigned_vms])
+        conn.commit()
+    finally:
+        conn.close()
+    return _get_user_by_username(username)
+
+def _delete_user(username: str):
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        row = conn.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone()
+        if not row:
+            return False
+        conn.execute('DELETE FROM user_vm_access WHERE user_id = ?', (row['id'],))
+        conn.execute('DELETE FROM users WHERE id = ?', (row['id'],))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+def _create_portal_token(username: str, is_admin: bool=False) -> str:
+    exp = int(time.time() + 30*24*3600)
+    payload = json.dumps({'u': username, 'exp': exp, 'admin': bool(is_admin)}, separators=(',', ':'))
+    mac = hmac.new(_PORTAL_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}.{mac}".encode('utf-8')).decode('utf-8')
+
+def _verify_portal_token(token: str):
+    try:
+        raw = base64.urlsafe_b64decode(token.encode('utf-8')).decode('utf-8')
+        payload, mac = raw.rsplit('.', 1)
+        expected = hmac.new(_PORTAL_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(mac, expected):
+            return None
+        data = json.loads(payload)
+        if int(data.get('exp') or 0) < int(time.time()):
+            return None
+        user = _get_user_by_username(data.get('u') or '')
+        if not user or user.get('disabled'):
+            return None
+        return user
+    except Exception:
+        return None
+
+def _current_portal_user():
+    auth = request.headers.get('Authorization', '')
+    token = None
+    if auth.lower().startswith('bearer '):
+        token = auth.split(None,1)[1].strip()
+    if not token:
+        token = request.cookies.get('Portal-Auth')
+    if not token:
+        return None
+    return _verify_portal_token(token)
+
+def portal_auth_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user = _current_portal_user()
+        if not user:
+            return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+        request.portal_user = user
+        return fn(*args, **kwargs)
+    return wrapper
+
+def _vm_access_mode(name: str) -> str:
+    meta = _instance_meta(name)
+    mode = str(meta.get('access_mode') or 'public').strip().lower()
+    return mode if mode in ('public', 'restricted') else 'public'
+
+def _user_can_access_vm(user, name: str) -> bool:
+    if _vm_access_mode(name) == 'public':
+        return True
+    if not user:
+        return False
+    return name in set(user.get('assignedVms') or [])
+
+def _portal_login_redirect(next_url: str):
+    return redirect('/portal/login?next=' + urlrequest.quote(next_url or '/portal', safe='/:?=&%'))
+
+def _render_vm_denied(name: str, user):
+    username = (user or {}).get('username', '')
+    page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Access required</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:640px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px;box-shadow:0 30px 80px rgba(0,0,0,.35)}}button,a{{display:inline-block;margin:8px 8px 0 0;padding:12px 16px;border-radius:12px;border:none;background:#2563eb;color:#fff;text-decoration:none;cursor:pointer}}.alt{{background:#334155}}textarea{{width:100%;min-height:110px;margin-top:12px;border-radius:12px;padding:12px;background:#020617;color:#fff;border:1px solid rgba(255,255,255,.1)}}</style></head><body><div class=card><h1>No access to {name}</h1><p>You are signed in as <strong>{username}</strong>, but this VM is restricted and not assigned to your account.</p><textarea id=note placeholder="Optional note for your access request"></textarea><div><button onclick="requestAccess()">Request access</button><a class=alt href="/portal">Open VM homepage</a><button class=alt onclick="logoutUser()">Log out</button></div><p id=msg style="opacity:.8;margin-top:12px"></p></div><script>async function requestAccess(){{const r=await fetch('/portal/api/request-access/{name}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{note:document.getElementById('note').value||''}})}});const j=await r.json().catch(()=>({{}}));document.getElementById('msg').textContent=j.ok?'Access request sent.':'Failed: '+(j.error||r.status)}} async function logoutUser(){{await fetch('/portal/api/auth/logout',{{method:'POST'}}).catch(()=>null);location.href='/portal/login';}}</script></body></html>'''
+    return Response(page, mimetype='text/html')
+
+def _enforce_vm_user_access(name: str):
+    if _vm_access_mode(name) == 'public':
+        return None
+    user = _current_portal_user()
+    next_url = request.path
+    if request.query_string:
+        next_url += '?' + request.query_string.decode('utf-8', 'ignore')
+    if not user:
+        return _portal_login_redirect(next_url)
+    if not _user_can_access_vm(user, name):
+        return _render_vm_denied(name, user)
+    request.portal_user = user
+    return None
+
+def _portal_vm_payload(name: str):
+    items = [i for i in manager_json_list() if i.get('name') == name]
+    vm = items[0] if items else {'name': name, 'status': 'Unknown', 'url': _build_vm_url(name)}
+    vm['accessMode'] = _vm_access_mode(name)
+    return vm
+
 def _state_dir():
     return os.environ.get('BLOBEDASH_STATE', '/opt/blobe-vm')
 
@@ -1652,6 +1895,132 @@ def api_upload_vm_favicon(name):
         return 'Not found', 404
 
 
+@app.post('/portal/api/auth/login')
+def portal_login_api():
+    data = request.get_json(silent=True) or {}
+    username = str(data.get('username') or '').strip()
+    password = str(data.get('password') or '')
+    user = _get_user_by_username(username)
+    if not user or user.get('disabled') or not _verify_user_password(password, user.get('password_hash') or ''):
+        return jsonify({'ok': False, 'error': 'invalid'}), 401
+    token = _create_portal_token(user['username'], bool(user.get('isAdmin')))
+    resp = jsonify({'ok': True, 'token': token, 'user': {k:v for k,v in user.items() if k != 'password_hash'}})
+    resp.set_cookie('Portal-Auth', token, httponly=True, samesite='Lax', max_age=30*24*3600)
+    return resp
+
+@app.post('/portal/api/auth/logout')
+def portal_logout_api():
+    resp = jsonify({'ok': True})
+    resp.delete_cookie('Portal-Auth')
+    return resp
+
+@app.get('/portal/api/auth/status')
+def portal_auth_status_api():
+    user = _current_portal_user()
+    return jsonify({'ok': bool(user), 'user': ({k:v for k,v in user.items() if k != 'password_hash'} if user else None)})
+
+@app.get('/portal/api/vms')
+@portal_auth_required
+def portal_vms_api():
+    user = request.portal_user
+    assigned = set(user.get('assignedVms') or [])
+    vms = []
+    for vm in manager_json_list():
+        if vm.get('name') in assigned or _vm_access_mode(vm.get('name')) == 'public':
+            item = dict(vm)
+            item['accessMode'] = _vm_access_mode(vm.get('name'))
+            item['allowed'] = _user_can_access_vm(user, vm.get('name'))
+            vms.append(item)
+    return jsonify({'ok': True, 'user': {k:v for k,v in user.items() if k != 'password_hash'}, 'vms': vms})
+
+@app.post('/portal/api/start/<name>')
+@portal_auth_required
+def portal_start_vm(name):
+    if not _user_can_access_vm(request.portal_user, name):
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    return api_start(name)
+
+@app.post('/portal/api/stop/<name>')
+@portal_auth_required
+def portal_stop_vm(name):
+    if not _user_can_access_vm(request.portal_user, name):
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    return api_stop(name)
+
+@app.post('/portal/api/request-access/<name>')
+@portal_auth_required
+def portal_request_access(name):
+    user = request.portal_user
+    if _user_can_access_vm(user, name):
+        return jsonify({'ok': False, 'error': 'You already have access'}), 400
+    note = ''
+    try:
+        data = request.get_json(silent=True) or {}
+        note = str(data.get('note') or '').strip()[:1000]
+    except Exception:
+        note = ''
+    conn = _users_conn()
+    try:
+        conn.execute('INSERT INTO access_requests (username, vm_name, note, status) VALUES (?, ?, ?, ?)', (user['username'], name, note, 'pending'))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'ok': True})
+
+@app.get('/portal')
+@app.get('/portal/')
+def portal_home():
+    user = _current_portal_user()
+    if not user:
+        return redirect('/portal/login')
+    page = '''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VM Portal</title><style>body{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;padding:24px}h1{margin-top:0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:20px}.card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:18px}.muted{opacity:.75}button,a.btn{display:inline-block;margin:8px 8px 0 0;padding:10px 14px;border-radius:12px;border:none;background:#2563eb;color:#fff;text-decoration:none;cursor:pointer}.alt{background:#334155}</style></head><body><div class=top><div><h1>Your VMs</h1><div class=muted id=welcome>Loading…</div></div><div><button class=alt onclick=logoutUser()>Log out</button></div></div><div id=list class=grid></div><script>async function logoutUser(){await fetch('/portal/api/auth/logout',{method:'POST'}).catch(()=>null);location.href='/portal/login'} async function load(){const r=await fetch('/portal/api/vms'); if(r.status===401){location.href='/portal/login'; return} const j=await r.json(); document.getElementById('welcome').textContent='Signed in as '+j.user.username; const list=document.getElementById('list'); list.innerHTML=''; (j.vms||[]).forEach(vm=>{const div=document.createElement('div'); div.className='card'; let actions='<a class="btn" href="/dashboard/vm/'+encodeURIComponent(vm.name)+'/">Open</a>'; if(vm.allowed){ actions += '<button onclick="vmAction(\'start\',\''+vm.name+'\')">Start</button><button class="alt" onclick="vmAction(\'stop\',\''+vm.name+'\')">Stop</button>';} div.innerHTML='<h3>'+vm.name+'</h3><div class="muted">Status: '+(vm.status||'Unknown')+'</div><div class="muted">Access mode: '+(vm.accessMode||'public')+'</div><div>'+actions+'</div>'; list.appendChild(div)})} async function vmAction(act,name){const r=await fetch('/portal/api/'+act+'/'+encodeURIComponent(name),{method:'POST'}); const j=await r.json().catch(()=>({})); alert(j.ok? act+' sent':'Failed: '+(j.error||r.status)); load()} load()</script></body></html>'''
+    return Response(page, mimetype='text/html')
+
+@app.get('/portal/login')
+def portal_login_page():
+    if _current_portal_user():
+        return redirect(request.args.get('next') or '/portal')
+    next_url = request.args.get('next') or '/portal'
+    next_js = json.dumps(next_url)
+    page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VM Login</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:420px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px}}input,button{{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#020617;color:#fff;margin-top:10px}}button{{background:#2563eb;cursor:pointer}}.muted{{opacity:.75}}</style></head><body><div class=card><h1>VM Login</h1><div class=muted>Sign in to access restricted BlobeVM instances.</div><form onsubmit="return doLogin(event)"><input id=u placeholder="Username" autocomplete="username" /><input id=p type=password placeholder="Password" autocomplete="current-password" /><button>Sign in</button><div id=err style="color:#fca5a5;margin-top:10px"></div></form></div><script>async function doLogin(e){{e.preventDefault();const r=await fetch('/portal/api/auth/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:document.getElementById('u').value,password:document.getElementById('p').value}})}});const j=await r.json().catch(()=>({{}}));if(j.ok){{location.href={next_js};return false}}document.getElementById('err').textContent=j.error||'Login failed';return false}}</script></body></html>'''
+    return Response(page, mimetype='text/html')
+
+@app.get('/dashboard/api/users')
+@v2_auth_required
+def dashboard_users_list():
+    conn = _users_conn()
+    try:
+        reqs = [dict(r) for r in conn.execute('SELECT id, username, vm_name, note, status, created_at FROM access_requests ORDER BY created_at DESC LIMIT 200').fetchall()]
+    finally:
+        conn.close()
+    return jsonify({'ok': True, 'users': _list_users(), 'requests': reqs, 'vms': manager_json_list()})
+
+@app.post('/dashboard/api/users')
+@v2_auth_required
+def dashboard_users_create():
+    data = request.get_json(silent=True) or {}
+    try:
+        user = _create_user(str(data.get('username') or '').strip(), str(data.get('password') or ''), data.get('assignedVms') or [])
+        return jsonify({'ok': True, 'user': {k:v for k,v in user.items() if k != 'password_hash'}})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.post('/dashboard/api/users/<username>')
+@v2_auth_required
+def dashboard_users_update(username):
+    data = request.get_json(silent=True) or {}
+    try:
+        user = _update_user(username, assigned_vms=(data.get('assignedVms') if 'assignedVms' in data else None), password=(str(data.get('password')) if data.get('password') else None), disabled=(data.get('disabled') if 'disabled' in data else None))
+        return jsonify({'ok': True, 'user': {k:v for k,v in user.items() if k != 'password_hash'}})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.post('/dashboard/api/users/<username>/delete')
+@v2_auth_required
+def dashboard_users_delete(username):
+    ok = _delete_user(username)
+    return jsonify({'ok': ok})
+
 # --- Dashboard v2 auth routes (top-level) ---
 @app.post('/Dashboard/api/auth/login')
 def dashboard_v2_login_public():
@@ -1775,6 +2144,7 @@ def api_get_vm_settings(name):
     meta = _instance_meta(name)
     safe = re.sub(r'[^A-Za-z0-9_-]', '_', name)
     fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{safe}.ico")
+    assigned_users = [u['username'] for u in _list_users() if name in (u.get('assignedVms') or [])]
     return jsonify({
         'ok': True,
         'name': name,
@@ -1782,6 +2152,8 @@ def api_get_vm_settings(name):
         'hostOverride': meta.get('host_override', ''),
         'pathOverride': meta.get('path_override', ''),
         'faviconUrl': f'/dashboard/vm-favicon/{name}' if os.path.isfile(fav_path) else '',
+        'accessMode': _vm_access_mode(name),
+        'assignedUsers': assigned_users,
     })
 
 
@@ -1792,6 +2164,7 @@ def api_set_vm_settings(name):
         data = request.get_json(silent=True) or {}
         host_override = (data.get('hostOverride') if isinstance(data, dict) else None)
         title = (data.get('title') if isinstance(data, dict) else None)
+        access_mode = (data.get('accessMode') if isinstance(data, dict) else None)
         changed_runtime = False
 
         if title is not None:
@@ -1811,6 +2184,12 @@ def api_set_vm_settings(name):
             host_override = str(host_override).strip()
             _set_instance_meta(name, 'host_override', host_override)
             changed_runtime = True
+
+        if access_mode is not None:
+            access_mode = str(access_mode).strip().lower()
+            if access_mode not in ('public', 'restricted'):
+                return jsonify({'ok': False, 'error': 'Invalid access mode'}), 400
+            _set_instance_meta(name, 'access_mode', access_mode)
 
         if changed_runtime:
             ok, out, err, rc = _run_manager('recreate', name)
@@ -1837,6 +2216,9 @@ def dashboard_vm_favicon(name):
 
 @app.get('/dashboard/vm/<name>/')
 def dashboard_vm_wrapper(name):
+        gate = _enforce_vm_user_access(name)
+        if gate is not None:
+                return gate
         try:
                 dash_optimizer.note_vm_activity(name, 'wrapper-open')
         except Exception:
@@ -3286,6 +3668,10 @@ def api_optimizer_clean_system():
 
 
 if __name__ == '__main__':
+    try:
+        _init_users_db()
+    except Exception:
+        pass
     try:
         dash_optimizer.start_background_loop()
     except Exception:

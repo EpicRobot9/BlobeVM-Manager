@@ -109,7 +109,7 @@ export default function VMManager(){
   const [createName, setCreateName] = useState('')
   const [createBusy, setCreateBusy] = useState(false)
   const [manageVm, setManageVm] = useState(null)
-  const [manageDraft, setManageDraft] = useState({ title:'', hostOverride:'', faviconUrl:'' })
+  const [manageDraft, setManageDraft] = useState({ title:'', hostOverride:'', faviconUrl:'', accessMode:'public', assignedUsers:[] })
   const [manageBusy, setManageBusy] = useState(false)
   const [faviconFile, setFaviconFile] = useState(null)
   const prevStatsRef = useRef({})
@@ -322,7 +322,9 @@ export default function VMManager(){
       setManageDraft({
         title: j.title || '',
         hostOverride: j.hostOverride || '',
-        faviconUrl: j.faviconUrl || ''
+        faviconUrl: j.faviconUrl || '',
+        accessMode: j.accessMode || 'public',
+        assignedUsers: j.assignedUsers || []
       })
     }catch(e){
       addToast({ title:'Load failed', message:String(e), type:'error', timeout:7000 })
@@ -337,7 +339,7 @@ export default function VMManager(){
       const r = await apiFetch(`/vm-settings/${encodeURIComponent(manageVm)}`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ title: manageDraft.title, hostOverride: manageDraft.hostOverride })
+        body: JSON.stringify({ title: manageDraft.title, hostOverride: manageDraft.hostOverride, accessMode: manageDraft.accessMode })
       })
       const j = await r.json().catch(()=>({ ok:r.ok }))
       if(!r.ok || j.ok === false) throw new Error(j.error || 'Failed saving VM settings')
@@ -474,6 +476,16 @@ export default function VMManager(){
             <span>Browser tab title</span>
             <input value={manageDraft.title || ''} onChange={e=>setManageDraft(s => ({ ...s, title: e.target.value }))} placeholder="My Cool VM" style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
           </label>
+          <label style={{display:'grid', gap:6}}>
+            <span>Access mode</span>
+            <select value={manageDraft.accessMode || 'public'} onChange={e=>setManageDraft(s => ({ ...s, accessMode: e.target.value }))} style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}}>
+              <option value="public">Public</option>
+              <option value="restricted">Restricted (login + assignment required)</option>
+            </select>
+          </label>
+          {manageDraft.accessMode === 'restricted' ? (
+            <div style={{color:'var(--muted)'}}>Users currently assigned to this VM: {(manageDraft.assignedUsers || []).length ? manageDraft.assignedUsers.join(', ') : 'none yet'} — edit assignments from the Users & Access page.</div>
+          ) : null}
           <label style={{display:'grid', gap:6}}>
             <span>VM favicon / tab icon</span>
             <input type="file" accept=".ico,image/x-icon,image/png,image/webp,image/jpeg" onChange={e=>setFaviconFile(e.target.files?.[0] || null)} style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />

@@ -12,6 +12,7 @@ import Optimizer from './pages/Optimizer'
 import Settings from './pages/Settings'
 import APIInfo from './pages/APIInfo'
 import AdvancedTools from './pages/AdvancedTools'
+import Users from './pages/Users'
 import { isAuthenticated, setToken } from './lib/auth'
 
 export default function App(){
@@ -58,6 +59,7 @@ export default function App(){
               <Route path="/settings" element={<Settings/>} />
               <Route path="/api" element={<APIInfo/>} />
               <Route path="/tools" element={<AdvancedTools/>} />
+              <Route path="/users" element={<Users/>} />
               <Route path="/login" element={<Navigate to="/" replace />} />
             </Routes>
           </div>

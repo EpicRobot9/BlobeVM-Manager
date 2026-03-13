@@ -8,6 +8,7 @@ const items = [
   {to:'/logs', label:'Logs Viewer'},
   {to:'/optimizer', label:'Optimizer Control'},
   {to:'/settings', label:'Settings'},
+  {to:'/users', label:'Users & Access'},
   {to:'/api', label:'API & System Info'},
   {to:'/tools', label:'Advanced Tools'}
 ]
