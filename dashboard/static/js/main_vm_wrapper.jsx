@@ -53,27 +53,9 @@
       window.requestAnimationFrame(()=> setPanelOpen(true));
     }, []);
 
-    const togglePanel = React.useCallback(()=>{
-      if(panelOpen) closePanel();
-      else openPanel();
-    }, [panelOpen, openPanel, closePanel]);
-
     React.useEffect(()=>()=>{
       if(closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
     }, []);
-
-    React.useEffect(()=>{
-      function onKeyDown(e){
-        const tag = (e.target && e.target.tagName) ? String(e.target.tagName).toLowerCase() : '';
-        if(tag === 'input' || tag === 'textarea' || (e.target && e.target.isContentEditable)) return;
-        if(e.ctrlKey && e.shiftKey && e.key === '.'){
-          e.preventDefault();
-          togglePanel();
-        }
-      }
-      window.addEventListener('keydown', onKeyDown);
-      return ()=> window.removeEventListener('keydown', onKeyDown);
-    }, [togglePanel]);
 
     async function stopVm(){
       if(stopBusy) return;
@@ -167,7 +149,7 @@
       React.createElement('div', { className:'vm-controls-shell' },
         panelMounted ? React.createElement('div', { className:`vm-controls-panel ${panelOpen ? 'open' : 'closed'}` },
           React.createElement('div', { className:'vm-controls-title' }, 'VM Controls'),
-          React.createElement('div', { className:'vm-controls-copy' }, 'Press Ctrl + Shift + . to toggle this panel. Use it when you want quick wrapper controls without leaving the VM.'),
+          React.createElement('div', { className:'vm-controls-copy' }, 'Quick wrapper controls for the current VM.'),
           React.createElement('div', { className:'vm-controls-row' },
             React.createElement('button', { className:'btn btn-danger', onClick: stopVm, disabled: stopBusy || !(vm && vm.running) }, stopBusy ? 'Stopping…' : ((vm && vm.running) ? 'Stop VM' : 'VM already stopped')),
             React.createElement('button', { className:'btn btn-secondary', onClick: ()=>{ window.location.href = '/portal'; } }, 'Open Portal'),
@@ -176,8 +158,7 @@
           ),
           actionMsg ? React.createElement('div', { className:`vm-toast ${actionTone}` }, actionMsg) : null
         ) : null
-      ),
-      !panelOpen ? React.createElement('div', { className:'vm-hotkey-hint' }, 'Ctrl + Shift + . for VM controls') : null
+      )
     );
 
     return React.createElement(React.Fragment, null,
