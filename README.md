@@ -1,12 +1,12 @@
 # BlobeVM (Modified DesktopOnCodespaces)
 
 ## Codespaces Installation
-Start a new blank codespace by going to https://github.com/codespaces/ and choosing the "Blank" template. Then run:
-```
-
 For a full description of the new modern dashboard (Dashboard v2), see `docs/DASHBOARD_V2.md`.
 For full CLI reference (including `apps`, `update-vm`, and `--yes` automation flags), see `docs/CLI.md`.
 
+Start a new blank codespace by going to https://github.com/codespaces/ and choosing the "Blank" template. Then run:
+
+```bash
 curl -O https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/install.sh
 chmod +x install.sh
 ./install.sh
@@ -131,8 +131,10 @@ blobe-vm-manager clear-host myvm
 
 
 
-# Interactive helper to set a host (shows IPs first)
+Interactive helper to set a host (shows IPs first):
+```bash
 blobe-vm-manager set-host-interactive myvm
+```
 
 Path mode (no domain configured):
 ```
@@ -146,7 +148,7 @@ blobe-vm-manager set-path myvm /desk/42
 blobe-vm-manager clear-path myvm
 ```
 
-# Dual access: Even when a host override or domain is used, each VM is still reachable via the path form (default /vm/<name>/ or custom base path) unless you remove the path router manually.
+Dual access: Even when a host override or domain is used, each VM is still reachable via the path form (default `/vm/<name>/` or custom base path) unless you remove the path router manually.
 
 ### 4) Global base path
 You can change the shared base path for path routing (default /vm):
@@ -199,6 +201,12 @@ Disable dashboard on fresh install:
 DISABLE_DASHBOARD=1 sudo bash server/install.sh
 ```
 Remove after install:
+```bash
+cd /opt/blobe-vm/traefik
+docker compose rm -sf dashboard
+sed -i '/dashboard:/,/^$/d' docker-compose.yml
+```
+
 Dashboard internal auth (optional):
 Set credentials before (re)deploying the dashboard so all UI/API requests require them:
 ```
@@ -207,14 +215,9 @@ export BLOBEDASH_PASS='StrongPassword123'
 sudo bash server/install.sh   # or: docker compose restart dashboard after editing compose
 ```
 If already deployed, update the env vars in `/opt/blobe-vm/traefik/docker-compose.yml` under the `dashboard` service and run:
-```
+```bash
 cd /opt/blobe-vm/traefik
 docker compose up -d dashboard
-```
-```
-cd /opt/blobe-vm/traefik
-docker compose rm -sf dashboard
-sed -i '/dashboard:/,/^$/d' docker-compose.yml
 ```
 
 ### Uninstall (nuke)
@@ -241,16 +244,17 @@ Notes:
 ## CLI Quick Reference
 
 ### Core lifecycle
-```
+```bash
 blobe-vm-manager list                  # Show all VMs and their state
 blobe-vm-manager create <name>         # Create a new VM instance
 blobe-vm-manager start <name>          # Start a VM
 blobe-vm-manager stop <name>           # Stop a VM
 blobe-vm-manager delete <name>         # Delete a VM (removes data)
 blobe-vm-manager rename old new        # Rename a VM (updates URLs)
+```
 
 ### Rebuild/update utilities
-```
+```bash
 blobe-vm-manager pull-repo             # git pull in the server repo (if present)
 blobe-vm-manager rebuild-image         # rebuild the BlobeVM Docker image from REPO_DIR
 blobe-vm-manager recreate-all          # recreate all VM containers using the current image
@@ -261,11 +265,11 @@ blobe-vm-manager delete-all-instances  # delete ALL VMs and their data (keeps im
 blobe-vm-manager update-and-rebuild    # pull repo, rebuild image, recreate all VMs
 blobe-vm-manager update-and-rebuild vm1 vm2  # pull repo, rebuild image, recreate only these VMs
 ```
-```
 
 ### VM maintenance and app controls
-```
+```bash
 blobe-vm-manager update-vm <name>           # apt update/dist-upgrade inside the VM
+blobe-vm-manager apps                       # list available app installers
 blobe-vm-manager app-install <name> chrome  # install Google Chrome inside the VM
 blobe-vm-manager app-status <name> chrome   # check if Chrome is installed in the VM
 ```
