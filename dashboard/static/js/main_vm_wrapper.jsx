@@ -6,8 +6,8 @@
 
   function App(){
     const vm = window.useVMStatus(init.vmname, { interval: 1600 });
-    const [iframeReady, setIframeReady] = React.useState(false);
-    const [frameLoaded, setFrameLoaded] = React.useState(false);
+    const [iframeReady, setIframeReady] = React.useState(true);
+    const [frameLoaded, setFrameLoaded] = React.useState(true);
     const [panelOpen, setPanelOpen] = React.useState(false);
     const [panelMounted, setPanelMounted] = React.useState(false);
     const [actionMsg, setActionMsg] = React.useState('');
@@ -27,13 +27,15 @@
         readySinceRef.current = null;
         setIframeReady(false);
         setFrameLoaded(false);
+      } else {
+        setIframeReady(true);
       }
     }, [vm && vm.running]);
 
     React.useEffect(()=>{
       const frame = document.getElementById('vmframe');
       if(!frame) return;
-      const onLoad = ()=> setFrameLoaded(true);
+      const onLoad = ()=> { setFrameLoaded(true); setIframeReady(true); };
       frame.addEventListener('load', onLoad);
       return ()=> frame.removeEventListener('load', onLoad);
     }, []);
@@ -157,16 +159,11 @@
             if(!readySinceRef.current) readySinceRef.current = Date.now();
           } else {
             readySinceRef.current = null;
-            if(!cancelled) setFrameLoaded(false);
           }
           const stableReady = ok && !!readySinceRef.current;
           if(!cancelled) setIframeReady(!!stableReady);
         } catch (e) {
           readySinceRef.current = null;
-          if(!cancelled) {
-            setIframeReady(false);
-            setFrameLoaded(false);
-          }
         }
       }
       check();
@@ -221,7 +218,7 @@
 
     return React.createElement(React.Fragment, null,
       controls,
-      readyForReveal ? null : React.createElement(window.VMFallback, { vmname:init.vmname, vmurl:init.vmurl, iframeReady: iframeReady && frameLoaded })
+      readyForReveal ? null : React.createElement(window.VMFallback, { vmname:init.vmname, vmurl:init.vmurl, iframeReady: iframeReady || frameLoaded })
     );
   }
 
