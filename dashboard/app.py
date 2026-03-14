@@ -1366,6 +1366,11 @@ def _vm_host_port(cname: str) -> str:
         pass
     return ''
 
+def _vm_backend_url(name: str, subpath: str = '') -> str:
+    prefix = _vm_path_prefix(name)
+    suffix = '/' + (subpath or '').lstrip('/') if subpath else '/'
+    return f'http://127.0.0.1:20000{prefix}{suffix}' if _is_direct_mode() else f'http://127.0.0.1:3000{prefix}{suffix}'
+
 def _vm_path_prefix(name: str) -> str:
     base_path = _read_env().get('BASE_PATH', '/vm') or '/vm'
     if not base_path.startswith('/'):
@@ -1389,8 +1394,10 @@ def _vm_path_prefix(name: str) -> str:
 def _build_vm_embed_url(name: str) -> str:
     if _is_direct_mode():
         return _build_vm_url(name)
-    prefix = _vm_path_prefix(name)
-    return f"{prefix}/."
+    base = _external_base_url()
+    if base:
+        return f"{base}/vmraw/{name}/"
+    return f"/vmraw/{name}/"
 
 
 def _build_vm_url(name: str) -> str:
