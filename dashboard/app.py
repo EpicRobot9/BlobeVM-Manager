@@ -1395,9 +1395,8 @@ def _build_vm_embed_url(name: str) -> str:
     if _is_direct_mode():
         return _build_vm_url(name)
     base = _external_base_url()
-    if base:
-        return f"{base}/vmraw/{name}/"
-    return f"/vmraw/{name}/"
+    root = f"{base}/vmraw/{name}" if base else f"/vmraw/{name}"
+    return f"{root}/vnc/index.html?autoconnect=1&resize=remote&clipboard_up=true&clipboard_down=true&clipboard_seamless=true&show_control_bar=true&path=/vmraw/{name}/websockify"
 
 
 def _build_vm_url(name: str) -> str:
