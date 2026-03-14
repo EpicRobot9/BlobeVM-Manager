@@ -2350,11 +2350,13 @@ def dashboard_vm_wrapper(name):
                 js_fav = json.dumps(fav_url)
                 js_url = json.dumps(url)
                 js_name = json.dumps(name)
+                js_status = json.dumps(_vm_status_payload(name))
         except Exception:
                 js_title = '"%s"' % (title.replace('"','\"'))
                 js_fav = '"%s"' % (fav_url.replace('"','\"'))
                 js_url = '"%s"' % (url.replace('"','\"'))
                 js_name = '"%s"' % (name.replace('"','\"'))
+                js_status = '{"ok":true,"status":"unknown","state":"unknown","running":false,"healthy":false,"crashed":false,"exists":false}'
 
         # The page includes React + Babel via CDN so we can write a compact React component
         # for the fallback UI without changing the project's build pipeline.
@@ -2432,7 +2434,7 @@ def dashboard_vm_wrapper(name):
             <div id="root"></div>
             <iframe id="vmframe" class="vm-iframe" src="about:blank" data-vm-src=__JS_URL__ style="display:none" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-popups"></iframe>
             <script>
-              window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__ };
+              window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__, initialStatus: __JS_STATUS__ };
               window.__VM_WRAPPER_FAVICON = __JS_FAVICON__;
               (function(){
                 try {
@@ -2462,7 +2464,7 @@ def dashboard_vm_wrapper(name):
         </body>
     </html>
     '''
-        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name).replace('__JS_FAVICON__', json.dumps(fav_url)).replace('__ASSET_VER__', asset_ver)
+        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name).replace('__JS_FAVICON__', json.dumps(fav_url)).replace('__JS_STATUS__', js_status).replace('__ASSET_VER__', asset_ver)
         resp = Response(page, mimetype='text/html')
         resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         resp.headers['Pragma'] = 'no-cache'

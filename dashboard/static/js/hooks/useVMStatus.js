@@ -3,7 +3,8 @@
     const interval = (opts && opts.interval) || 1500;
     const { useState, useEffect } = React;
     return (function useHook(){
-      const [state, setState] = useState({ ok:true, status:'unknown', state:'unknown', running:false, healthy:false, crashed:false, exists:false });
+      const seeded = (window.__VM_WRAPPER_INIT && window.__VM_WRAPPER_INIT.vmname === vmname && window.__VM_WRAPPER_INIT.initialStatus) || { ok:true, status:'unknown', state:'unknown', running:false, healthy:false, crashed:false, exists:false };
+      const [state, setState] = useState(seeded);
       useEffect(()=>{
         let cancelled = false;
         let handle = null;
