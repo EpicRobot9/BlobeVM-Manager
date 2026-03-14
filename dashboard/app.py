@@ -2114,19 +2114,22 @@ def dashboard_v2_login_public():
     pw = data.get('password','') if isinstance(data, dict) else ''
     cfg_pw = _get_v2_password()
     if not cfg_pw:
-        return jsonify({'ok': False, 'error': 'not-configured'}), 404
+        return jsonify({'ok': True, 'token': '', 'expiry': None, 'authRequired': False})
     if pw != cfg_pw:
         return jsonify({'ok': False, 'error': 'invalid'}), 401
     exp = int(time.time() + 24*3600)
     payload = f"{exp}:{os.urandom(8).hex()}"
     token = _sign_v2_token(payload)
-    resp = jsonify({'ok': True, 'token': token, 'expiry': exp})
+    resp = jsonify({'ok': True, 'token': token, 'expiry': exp, 'authRequired': True})
     resp.set_cookie('Dashboard-Auth', token, httponly=True, samesite='Lax')
     return resp
 
 
 @app.get('/Dashboard/api/auth/status')
 def dashboard_v2_status_public():
+    cfg_pw = _get_v2_password()
+    if not cfg_pw:
+        return jsonify({'ok': True, 'authRequired': False})
     auth = request.headers.get('Authorization','')
     token = None
     if auth.lower().startswith('bearer '):
@@ -2134,7 +2137,7 @@ def dashboard_v2_status_public():
     if not token:
         token = request.cookies.get('Dashboard-Auth')
     ok = bool(token and _verify_v2_token(token))
-    return jsonify({'ok': ok})
+    return jsonify({'ok': ok, 'authRequired': True})
 
 
 # --- Dashboard v2 static page routes (top-level) ---
@@ -3066,12 +3069,12 @@ def dashboard_v2_stats_alias():
 
 @app.post('/dashboard/api/auth/login')
 def dashboard_v2_login_alias():
-    return dashboard_v2_login()
+    return dashboard_v2_login_public()
 
 
 @app.get('/dashboard/api/auth/status')
 def dashboard_v2_status_alias():
-    return dashboard_v2_status()
+    return dashboard_v2_status_public()
 
 
 @app.get('/Dashboard/api/vm/logs/<name>')
