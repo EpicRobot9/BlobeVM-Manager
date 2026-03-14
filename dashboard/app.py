@@ -2378,7 +2378,7 @@ def dashboard_vm_wrapper(name):
                 :root{color-scheme:dark;--bg:#050816;--bg2:#0b1226;--card:rgba(12,18,38,.72);--line:rgba(255,255,255,.08);--text:#eef4ff;--muted:#9db0d1;--primary:#5ea2ff;--primary2:#7c3aed;--danger:#ff5c7a;--success:#22c55e;--warning:#f59e0b}
                 html,body,#root{height:100%;margin:0}
                 body{font-family:Inter,system-ui,Arial,sans-serif;background:radial-gradient(circle at top,#101933 0%,#050816 58%,#03050d 100%);color:var(--text);overflow:hidden}
-                .vm-iframe{position:fixed;inset:0;width:100vw;height:100vh;display:block;border:none;background:#000;overflow:hidden}
+                .vm-iframe{position:fixed;top:-2px;left:-2px;width:calc(100vw + 4px);height:calc(100vh + 4px);display:block;border:none;background:#000;overflow:hidden;scrollbar-width:none;-ms-overflow-style:none}
                 .vm-controls-handle{position:fixed;right:18px;bottom:18px;z-index:58;width:46px;height:46px;border-radius:16px;border:1px solid rgba(255,255,255,.12);background:linear-gradient(180deg,rgba(12,18,38,.78),rgba(5,8,22,.82));color:#eef4ff;display:flex;align-items:center;justify-content:center;font-size:21px;font-weight:900;cursor:pointer;box-shadow:0 16px 34px rgba(0,0,0,.28);backdrop-filter:blur(16px);opacity:.68;transition:transform .18s ease, box-shadow .18s ease, opacity .18s ease}
                 .vm-controls-handle:hover{transform:translateY(-1px);box-shadow:0 20px 42px rgba(0,0,0,.34);opacity:.92}
                 .vm-controls-shell{position:fixed;right:18px;bottom:76px;z-index:60;pointer-events:none}
@@ -2432,7 +2432,7 @@ def dashboard_vm_wrapper(name):
         </head>
         <body>
             <div id="root"></div>
-            <iframe id="vmframe" class="vm-iframe" src="about:blank" data-vm-src=__JS_URL__ style="display:none" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-popups"></iframe>
+            <iframe id="vmframe" class="vm-iframe" src="about:blank" data-vm-src=__JS_URL__ style="display:none" scrolling="no" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-popups"></iframe>
             <script>
               window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__, initialStatus: __JS_STATUS__ };
               window.__VM_WRAPPER_FAVICON = __JS_FAVICON__;
