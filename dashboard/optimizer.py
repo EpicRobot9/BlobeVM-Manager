@@ -29,6 +29,7 @@ ACTIVITY_META_DIR = os.path.join(STATE_DIR, '.optimizer_activity')
 PROFILE_META_PATH = os.path.join(STATE_DIR, '.optimizer_profiles.json')
 HISTORY_META_PATH = os.path.join(STATE_DIR, '.optimizer_history.json')
 TREND_META_PATH = os.path.join(STATE_DIR, '.optimizer_trends.json')
+NOTIFICATION_META_DIR = os.path.join(STATE_DIR, '.optimizer_notifications')
 
 DENSITY_PROFILES = {
     'single-user': {
@@ -78,6 +79,8 @@ DEFAULT_CFG = {
     'protectActiveVms': True,
     'activityWindowSeconds': 300,
     'idleGraceSeconds': 1800,
+    'idleShutdownSeconds': 1800,
+    'notificationLeadSeconds': 10,
     'blockStartsOnPressure': True,
     'allowForceStartUnderPressure': True,
     'protectedRestartCooldownSeconds': 900,
@@ -224,6 +227,93 @@ def _activity_payload(name: str):
     if not isinstance(data, dict):
         data = {}
     return data
+
+
+def _notification_path(name: str):
+    return os.path.join(NOTIFICATION_META_DIR, re.sub(r'[^A-Za-z0-9_.-]', '_', name) + '.json')
+
+
+def push_vm_notification(name: str, kind: str, title: str, body: str, ttl_seconds: int = 60, extra: dict | None = None):
+    try:
+        os.makedirs(NOTIFICATION_META_DIR, exist_ok=True)
+        now = int(time.time())
+        payload = {
+            'id': f'{name}-{kind}-{now}',
+            'name': name,
+            'kind': kind,
+            'title': title,
+            'body': body,
+            'createdAt': now,
+            'expiresAt': now + max(5, int(ttl_seconds or 60)),
+            'extra': extra or {},
+        }
+        path = _notification_path(name)
+        existing = _read_json_file(path, {'items': []})
+        items = [x for x in (existing.get('items') or []) if int(x.get('expiresAt') or 0) > now]
+        items.append(payload)
+        _write_json_file(path, {'items': items[-10:]})
+        return payload
+    except Exception as e:
+        log(f'failed pushing vm notification for {name}: {e}')
+        return None
+
+
+def get_vm_notifications(name: str, clear: bool = False):
+    path = _notification_path(name)
+    now = int(time.time())
+    data = _read_json_file(path, {'items': []})
+    items = [x for x in (data.get('items') or []) if int(x.get('expiresAt') or 0) > now]
+    if clear:
+        _write_json_file(path, {'items': []})
+    elif len(items) != len(data.get('items') or []):
+        _write_json_file(path, {'items': items})
+    return items
+
+
+def _notify_before_action(name: str, vm_state: dict | None, action: str, reason: str, cfg: dict):
+    vm_state = vm_state or {}
+    activity = str(vm_state.get('activityClass') or 'idle')
+    if activity != 'active':
+        return
+    lead = max(1, int(cfg.get('notificationLeadSeconds', 10) or 10))
+    push_vm_notification(
+        name,
+        'optimizer-action',
+        'Optimizer action incoming',
+        f'The optimizer will {action} this VM in {lead} seconds ({reason}). Save your work if needed.',
+        ttl_seconds=lead + 25,
+        extra={'action': action, 'reason': reason, 'leadSeconds': lead},
+    )
+    log(f'notified active VM {name} about upcoming {action} ({reason}) in {lead}s')
+    time.sleep(lead)
+
+
+def _stop_vm(name: str, vm_state: dict | None, cfg: dict, reason: str, cooldown_key: str):
+    cooldown = int(cfg.get('guardCooldownSeconds', 300))
+    if not _action_allowed(name, cooldown_key, cooldown):
+        return None
+    _notify_before_action(name, vm_state, 'stop', reason, cfg)
+    try:
+        subprocess.check_call(['docker', 'stop', f'blobevm_{name}'])
+        log(f'stopped VM {name} due to {reason}')
+        return {'action': 'stop', 'reason': reason, 'container': f'blobevm_{name}', 'name': name}
+    except Exception as e:
+        log(f'failed stopping VM {name} due to {reason}: {e}')
+        return None
+
+
+def _restart_vm_container(name: str, vm_state: dict | None, cfg: dict, reason: str, action_key: str):
+    cooldown = int(cfg.get('guardCooldownSeconds', 300))
+    if not _action_allowed(name, action_key, cooldown):
+        return None
+    _notify_before_action(name, vm_state, 'restart', reason, cfg)
+    try:
+        subprocess.check_call(['docker', 'restart', f'blobevm_{name}'])
+        log(f'restarted VM {name} due to {reason}')
+        return {'action': 'restart', 'reason': reason, 'container': f'blobevm_{name}', 'name': name}
+    except Exception as e:
+        log(f'failed restarting VM {name} due to {reason}: {e}')
+        return None
 
 
 def _history_state():
@@ -539,7 +629,9 @@ def perform_scheduled_restart(cfg: dict):
                 log(f'skip restart {name} (cooldown)')
                 continue
             try:
-                subprocess.check_call(['docker', 'restart', name])
+                restarted_event = _restart_vm_container(vm_name, vm_state, cfg, 'scheduled-restart', 'scheduled-restart')
+                if not restarted_event:
+                    continue
                 restarted += 1
                 log(f'scheduler restart {name}')
                 try:
@@ -588,11 +680,11 @@ def _run_memory_guard(cfg, vm_state_map=None, host_pressure=None):
                 if not _action_allowed(name, 'memory-restart', cooldown):
                     continue
                 log(f'Restarting {name} due to memory {perc}%')
-                try:
-                    subprocess.check_call(['docker', 'restart', name])
-                except Exception:
-                    pass
-                return {'action': 'restart', 'reason': 'memory', 'container': name, 'perc': perc}
+                restarted = _restart_vm_container(vm_name, vm_state, cfg, 'memory', 'memory-restart')
+                if restarted:
+                    restarted['perc'] = perc
+                    restarted['container'] = name
+                    return restarted
     except Exception as e:
         log(f'memguard error {e}')
     return None
@@ -629,11 +721,11 @@ def _run_cpu_guard(cfg, vm_state_map=None, host_pressure=None):
                 if not _action_allowed(name, 'cpu-restart', cooldown):
                     continue
                 log(f'Restarting {name} due to cpu {perc}%')
-                try:
-                    subprocess.check_call(['docker', 'restart', name])
-                except Exception:
-                    pass
-                return {'action': 'restart', 'reason': 'cpu', 'container': name, 'perc': perc}
+                restarted = _restart_vm_container(vm_name, vm_state, cfg, 'cpu', 'cpu-restart')
+                if restarted:
+                    restarted['perc'] = perc
+                    restarted['container'] = name
+                    return restarted
     except Exception as e:
         log(f'cpuguard error {e}')
     return None
@@ -679,12 +771,12 @@ def _run_swap_guard(cfg, vm_state_map=None, host_pressure=None):
                 except Exception:
                     pass
                 if heaviest:
-                    try:
-                        subprocess.check_call(['docker', 'restart', heaviest])
+                    heaviest_vm = heaviest[len('blobevm_'):] if heaviest.startswith('blobevm_') else heaviest
+                    restarted = _restart_vm_container(heaviest_vm, vm_state_map.get(heaviest_vm), cfg, 'swap', 'swap-restart')
+                    if restarted:
                         log(f'Restarting {heaviest} due to swap {perc}%')
-                    except Exception:
-                        pass
-                    return {'action': 'restart', 'reason': 'swap', 'perc': perc, 'heaviest': heaviest}
+                        restarted.update({'perc': perc, 'heaviest': heaviest})
+                        return restarted
     except Exception as e:
         log(f'swapguard error {e}')
     return None
@@ -776,8 +868,11 @@ def _run_health_guard(cfg, vm_state_map=None, host_pressure=None):
                     if not _action_allowed(name, 'health-restart', cooldown):
                         return {'action': 'cooldown', 'name': name, 'reason': 'health-restart'}
                     log(f'Health restart container {name}'); open(f2, 'w').write(str(int(time.time())))
-                    subprocess.check_call(['docker', 'restart', f'blobevm_{name}'])
-                    return {'action': 'restart_container', 'name': name}
+                    restarted = _restart_vm_container(name, vm_state_map.get(name), cfg, 'health', 'health-restart')
+                    if restarted:
+                        restarted['action'] = 'restart_container'
+                        return restarted
+                    return {'action': 'cooldown', 'name': name, 'reason': 'health-restart-skipped'}
                 if protected:
                     return {'action': 'warn', 'name': name, 'reason': 'health-protected-recreate-skipped'}
                 cooldown = int(cfg.get('guardCooldownSeconds', 300))
@@ -813,6 +908,7 @@ def _derive_vm_states(cfg: dict, stats: dict):
         activity = _activity_payload(name)
         last_activity = int(activity.get('lastActivityTs') or 0)
         age = max(0, now - last_activity) if last_activity else None
+        activity_source = activity.get('source') or ''
         profile = profiles.get(name, 'desktop')
         activity_class = 'idle'
         protected = False
@@ -853,6 +949,7 @@ def _derive_vm_states(cfg: dict, stats: dict):
             'protected': protected,
             'lastActivityTs': last_activity,
             'secondsSinceActivity': age,
+            'activitySource': activity_source,
             'cpuPercent': round(cpu, 2),
             'memPercent': round(mem, 2),
             'pressure': pressure,
@@ -931,12 +1028,28 @@ def _stop_idle_pressure_vm(cfg: dict, vm_states, host_pressure):
         cooldown = int(cfg.get('guardCooldownSeconds', 300))
         if not _action_allowed(name, 'pressure-stop', cooldown):
             continue
-        try:
-            subprocess.check_call(['docker', 'stop', f'blobevm_{name}'])
-            log(f'stopped idle VM {name} due to host pressure {host_pressure.get("level")}')
-            return {'action': 'stop', 'reason': 'pressure-relief', 'container': f'blobevm_{name}', 'name': name, 'pressureLevel': host_pressure.get('level'), 'candidateScore': vm.get('score'), 'candidateReasons': vm.get('reasons')}
-        except Exception as e:
-            log(f'failed stopping idle VM {name} for pressure relief: {e}')
+        relief = _stop_vm(name, next((x for x in (vm_states or []) if x.get('name') == name), None), cfg, 'pressure-relief', 'pressure-stop')
+        if relief:
+            relief.update({'pressureLevel': host_pressure.get('level'), 'candidateScore': vm.get('score'), 'candidateReasons': vm.get('reasons')})
+            return relief
+    return None
+
+
+def _stop_idle_inactive_vms(cfg: dict, vm_states):
+    threshold = max(60, int(cfg.get('idleShutdownSeconds', cfg.get('idleGraceSeconds', 1800)) or 1800))
+    for vm in (vm_states or []):
+        if not vm.get('running'):
+            continue
+        if vm.get('activityClass') != 'idle':
+            continue
+        seconds = vm.get('secondsSinceActivity')
+        if seconds is None or int(seconds) < threshold:
+            continue
+        stopped = _stop_vm(vm.get('name'), vm, cfg, 'idle-timeout', 'idle-shutdown-stop')
+        if stopped:
+            stopped['idleSeconds'] = int(seconds)
+            stopped['thresholdSeconds'] = threshold
+            return stopped
     return None
 
 
@@ -1107,6 +1220,9 @@ def run_once():
         host_pressure = _derive_host_pressure(pre_stats, cfg)
         vm_states = _derive_vm_states(cfg, pre_stats)
         vm_state_map = _vm_state_map(vm_states)
+        idle_shutdown = _stop_idle_inactive_vms(cfg, vm_states)
+        if idle_shutdown:
+            events.append(idle_shutdown)
         if host_pressure.get('level') in ('pressured', 'critical') and len(events) < max_actions:
             relief = _stop_idle_pressure_vm(cfg, vm_states, host_pressure)
             if relief:

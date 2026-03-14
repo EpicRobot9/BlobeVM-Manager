@@ -53,4 +53,20 @@
     const body = await readJson(res);
     return { ok: !!(res.ok && body && body.ok), status: res.status, body };
   };
+  window.api.getVMNotifications = async function(vmname, clear){
+    const suffix = clear ? '?clear=1' : '';
+    const res = await fetch(`/dashboard/api/vm/${encodeURIComponent(vmname)}/notifications${suffix}`, { cache:'no-store' });
+    const body = await readJson(res);
+    return { ok: !!(res.ok && body && body.ok), status: res.status, body };
+  };
+
+  window.api.noteOptimizerActivity = async function(vmname, source){
+    const res = await fetch(`/dashboard/api/optimizer/activity/${encodeURIComponent(vmname)}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ source: source || 'vm-wrapper' })
+    });
+    const body = await readJson(res);
+    return { ok: !!(res.ok && body && body.ok), status: res.status, body };
+  };
 })();

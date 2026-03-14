@@ -14,9 +14,12 @@
     const [actionTone, setActionTone] = React.useState('ok');
     const [stopBusy, setStopBusy] = React.useState(false);
     const [logoutBusy, setLogoutBusy] = React.useState(false);
+    const [notification, setNotification] = React.useState(null);
+    const [notificationSeenId, setNotificationSeenId] = React.useState('');
     const startMsRef = React.useRef(Date.now());
     const readySinceRef = React.useRef(null);
     const closeTimerRef = React.useRef(null);
+    const lastActivitySentRef = React.useRef(0);
 
     React.useEffect(()=>{
       if(!(vm && vm.running)){
@@ -34,6 +37,55 @@
       frame.addEventListener('load', onLoad);
       return ()=> frame.removeEventListener('load', onLoad);
     }, []);
+
+    const sendActivity = React.useCallback(async (source)=>{
+      const now = Date.now();
+      if(now - lastActivitySentRef.current < 15000) return;
+      lastActivitySentRef.current = now;
+      try { await window.api.noteOptimizerActivity(init.vmname, source || 'vm-wrapper'); } catch (_) {}
+    }, []);
+
+    React.useEffect(()=>{
+      sendActivity('wrapper-open');
+      const onUserSignal = ()=> sendActivity('user-input');
+      const onVisible = ()=> { if(document.visibilityState === 'visible') sendActivity('visible'); };
+      const events = ['pointerdown', 'keydown', 'mousemove', 'focus'];
+      events.forEach(ev => window.addEventListener(ev, onUserSignal, { passive:true }));
+      document.addEventListener('visibilitychange', onVisible);
+      const timer = setInterval(()=>{
+        if(document.visibilityState === 'visible') sendActivity('heartbeat');
+      }, 20000);
+      return ()=>{
+        events.forEach(ev => window.removeEventListener(ev, onUserSignal));
+        document.removeEventListener('visibilitychange', onVisible);
+        clearInterval(timer);
+      };
+    }, [sendActivity]);
+
+    React.useEffect(()=>{
+      let cancelled = false;
+      async function pollNotifications(){
+        try{
+          const res = await window.api.getVMNotifications(init.vmname, false);
+          const items = (res.body && res.body.items) || [];
+          const next = items.length ? items[items.length - 1] : null;
+          if(!cancelled && next && next.id !== notificationSeenId){
+            setNotification(next);
+            setNotificationSeenId(next.id);
+          }
+        }catch(_){ }
+      }
+      pollNotifications();
+      const t = setInterval(pollNotifications, 2000);
+      return ()=>{ cancelled = true; clearInterval(t); };
+    }, [notificationSeenId]);
+
+    React.useEffect(()=>{
+      if(!notification) return;
+      const ttlMs = Math.max(4000, (((notification.extra || {}).leadSeconds || 10) + 3) * 1000);
+      const t = window.setTimeout(()=> setNotification(null), ttlMs);
+      return ()=> window.clearTimeout(t);
+    }, [notification]);
 
     const closePanel = React.useCallback(()=>{
       setPanelOpen(false);
@@ -140,6 +192,12 @@
 
     const readyForReveal = !!(vm && vm.running && iframeReady && frameLoaded && (Date.now() - startMsRef.current >= MIN_LOADING_MS));
     const controls = React.createElement(React.Fragment, null,
+      notification ? React.createElement('div', {
+        style:{position:'fixed',top:18,left:'50%',transform:'translateX(-50%)',zIndex:90,maxWidth:'min(720px,calc(100vw - 24px))',padding:'14px 18px',borderRadius:'18px',border:'1px solid rgba(255,255,255,.14)',background:'linear-gradient(180deg, rgba(120,53,15,.95), rgba(69,26,3,.95))',color:'#fff7ed',boxShadow:'0 18px 40px rgba(0,0,0,.35)',backdropFilter:'blur(16px)'}
+      },
+        React.createElement('div', { style:{fontWeight:800, marginBottom:4} }, notification.title || 'Optimizer notification'),
+        React.createElement('div', { style:{fontSize:14, lineHeight:1.45} }, notification.body || '')
+      ) : null,
       !panelOpen ? React.createElement('button', {
         className:'vm-controls-handle',
         type:'button',

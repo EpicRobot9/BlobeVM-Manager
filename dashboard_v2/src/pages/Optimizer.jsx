@@ -41,6 +41,8 @@ export default function Optimizer(){
           minAvailableMemoryMb: j.cfg?.minAvailableMemoryMb ?? 2048,
           maxSwapPercent: j.cfg?.maxSwapPercent ?? 10,
           activityWindowSeconds: j.cfg?.activityWindowSeconds ?? 300,
+          idleShutdownSeconds: j.cfg?.idleShutdownSeconds ?? 1800,
+          notificationLeadSeconds: j.cfg?.notificationLeadSeconds ?? 10,
           gamingVmCpuBudgetPercent: j.cfg?.gamingVmCpuBudgetPercent ?? 30,
           interactiveVmCpuBudgetPercent: j.cfg?.interactiveVmCpuBudgetPercent ?? 20,
           gamingVmMemoryMb: j.cfg?.gamingVmMemoryMb ?? 3072,
@@ -80,6 +82,8 @@ export default function Optimizer(){
         ['minAvailableMemoryMb', Number(settingsDraft.minAvailableMemoryMb || 2048)],
         ['maxSwapPercent', Number(settingsDraft.maxSwapPercent || 10)],
         ['activityWindowSeconds', Number(settingsDraft.activityWindowSeconds || 300)],
+        ['idleShutdownSeconds', Number(settingsDraft.idleShutdownSeconds || 1800)],
+        ['notificationLeadSeconds', Number(settingsDraft.notificationLeadSeconds || 10)],
         ['gamingVmCpuBudgetPercent', Number(settingsDraft.gamingVmCpuBudgetPercent || 30)],
         ['interactiveVmCpuBudgetPercent', Number(settingsDraft.interactiveVmCpuBudgetPercent || 20)],
         ['gamingVmMemoryMb', Number(settingsDraft.gamingVmMemoryMb || 3072)],
@@ -208,6 +212,8 @@ export default function Optimizer(){
           <SettingField label="Max swap percent" value={settingsDraft.maxSwapPercent ?? ''} min={0} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', maxSwapPercent: e.target.value }))} />
           <SettingField label="Activity window (seconds)" value={settingsDraft.activityWindowSeconds ?? ''} min={30} step={30} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', activityWindowSeconds: e.target.value }))} />
           <SettingField label="Gaming VM CPU budget (%)" value={settingsDraft.gamingVmCpuBudgetPercent ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', gamingVmCpuBudgetPercent: e.target.value }))} />
+          <SettingField label="Idle shutdown (seconds)" value={settingsDraft.idleShutdownSeconds ?? ''} min={60} step={30} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', idleShutdownSeconds: e.target.value }))} />
+          <SettingField label="Notification lead time (seconds)" value={settingsDraft.notificationLeadSeconds ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', notificationLeadSeconds: e.target.value }))} />
           <SettingField label="Interactive VM CPU budget (%)" value={settingsDraft.interactiveVmCpuBudgetPercent ?? ''} min={1} step={1} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', interactiveVmCpuBudgetPercent: e.target.value }))} />
           <SettingField label="Gaming VM RAM budget (MB)" value={settingsDraft.gamingVmMemoryMb ?? ''} min={256} step={128} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', gamingVmMemoryMb: e.target.value }))} />
           <SettingField label="Interactive VM RAM budget (MB)" value={settingsDraft.interactiveVmMemoryMb ?? ''} min={256} step={128} onChange={e=>setSettingsDraft(s => ({ ...s, densityProfile:'custom', interactiveVmMemoryMb: e.target.value }))} />
