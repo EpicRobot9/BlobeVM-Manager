@@ -2430,7 +2430,7 @@ def dashboard_vm_wrapper(name):
         </head>
         <body>
             <div id="root"></div>
-            <iframe id="vmframe" class="vm-iframe" src=__JS_URL__ style="display:none" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-popups"></iframe>
+            <iframe id="vmframe" class="vm-iframe" src="about:blank" data-vm-src=__JS_URL__ style="display:none" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-popups"></iframe>
             <script>
               window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__ };
               window.__VM_WRAPPER_FAVICON = __JS_FAVICON__;
