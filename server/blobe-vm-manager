@@ -292,6 +292,13 @@ common_labels() {
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}-path.service=${name}-path"
       $(maybe_auth_router_label "${name}-path" "$auth_mw")
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.regex=^/vmraw/${name}/?(.*)"
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.replacement=${prefix_path}/\${1}"
+      "--label=traefik.http.routers.${name}-raw.rule=PathPrefix(\`/vmraw/${name}/\`)||Path(\`/vmraw/${name}\`)"
+      "--label=traefik.http.routers.${name}-raw.entrypoints=web"
+      "--label=traefik.http.services.${name}-raw.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-raw.service=${name}-raw"
+      "--label=traefik.http.routers.${name}-raw.middlewares=${name}-raw-path"
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       # Add HTTPS routers; include certresolver only when TLS is enabled
@@ -308,10 +315,17 @@ common_labels() {
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
         $(maybe_auth_router_label "${name}-path-secure" "$auth_mw")
+        "--label=traefik.http.routers.${name}-raw-secure.rule=PathPrefix(\`/vmraw/${name}/\`)||Path(\`/vmraw/${name}\`)"
+        "--label=traefik.http.routers.${name}-raw-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-raw-secure.tls=true"
+        "--label=traefik.http.services.${name}-raw-secure.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-raw-secure.service=${name}-raw"
+        "--label=traefik.http.routers.${name}-raw-secure.middlewares=${name}-raw-path"
       )
       labels+=(
         "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
         "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
+        "--label=traefik.http.routers.${name}-raw-secure.tls.certresolver=myresolver"
       )
     fi
   elif [[ -n "${BLOBEVM_DOMAIN:-}" && "${MERGED_MODE:-0}" -ne 1 ]]; then
