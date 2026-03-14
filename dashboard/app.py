@@ -1395,7 +1395,8 @@ def _build_vm_embed_url(name: str) -> str:
 
 def _build_vm_url(name: str) -> str:
     """Best-effort VM URL appropriate for the current mode, for browser-origin host.
-    In direct mode, combine request host with published port. In merged mode, use manager url.
+    Prefer the wrapper route on the current dashboard host so users land on /vm/<name>/
+    with the overlay UI instead of raw runtime endpoints.
     """
     if _is_direct_mode():
         host = _request_host()
@@ -1405,11 +1406,11 @@ def _build_vm_url(name: str) -> str:
         hp = _vm_host_port(cname)
         if hp:
             return f'http://{host}:{hp}/'
-    # Fallback to manager-provided URL
-    try:
-        return subprocess.check_output([MANAGER, 'url', name], text=True).strip()
-    except Exception:
-        return ''
+    prefix = _vm_path_prefix(name)
+    base = _external_base_url()
+    if base:
+        return f'{base}{prefix}/'
+    return f'{prefix}/'
 
 def manager_json_list():
     """Return a list of instances with best-effort status and URL.
@@ -1447,6 +1448,9 @@ def manager_json_list():
                         it['port'] = hp
                     if hp and host:
                         it['url'] = f"http://{host}:{hp}/"
+            else:
+                for it in instances:
+                    it['url'] = _build_vm_url(it['name'])
             # Apply transient statuses (e.g., rebuilding/updating)
             for it in instances:
                 try:
@@ -1507,10 +1511,7 @@ def manager_json_list():
             if hp and hp.isdigit():
                 port = hp
         else:
-            try:
-                url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
-            except Exception:
-                url = ''
+            url = _build_vm_url(name)
         # Transient status override
         if _has_flag(name, 'rebuilding'):
             status = 'Rebuilding...'
