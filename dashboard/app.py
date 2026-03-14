@@ -1334,7 +1334,7 @@ def _run_manager(*args):
 
 def _is_direct_mode():
     env = _read_env()
-    return env.get('NO_TRAEFIK', '1') == '1'
+    return env.get('NO_TRAEFIK', '0') == '1'
 
 def _request_host():
     try:
@@ -1724,7 +1724,7 @@ def _escalate_vm_to_openclaw(name: str, reason: str, extra=None):
 @auth_required
 def api_modeinfo():
     env = _read_env()
-    merged = env.get('NO_TRAEFIK', '1') == '0'
+    merged = env.get('NO_TRAEFIK', '0') == '0'
     base_path = env.get('BASE_PATH', '/vm')
     domain = env.get('BLOBEVM_DOMAIN', '')
     dash_port = env.get('DASHBOARD_PORT', '')
