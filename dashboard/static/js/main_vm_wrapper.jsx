@@ -2,7 +2,7 @@
   const React = window.React;
   const ReactDOM = window.ReactDOM;
   const init = window.__VM_WRAPPER_INIT || { vmname:null, vmurl:null };
-  const MIN_LOADING_MS = 1800;
+  const MIN_LOADING_MS = 0;
 
   function App(){
     const vm = window.useVMStatus(init.vmname, { interval: 1600 });
@@ -159,7 +159,7 @@
             readySinceRef.current = null;
             if(!cancelled) setFrameLoaded(false);
           }
-          const stableReady = ok && readySinceRef.current && (Date.now() - readySinceRef.current >= 1800);
+          const stableReady = ok && !!readySinceRef.current;
           if(!cancelled) setIframeReady(!!stableReady);
         } catch (e) {
           readySinceRef.current = null;
