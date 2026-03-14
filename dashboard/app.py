@@ -1389,10 +1389,8 @@ def _vm_path_prefix(name: str) -> str:
 def _build_vm_embed_url(name: str) -> str:
     if _is_direct_mode():
         return _build_vm_url(name)
-    base = _external_base_url()
-    if base:
-        return f"{base}/vmraw/{name}/"
-    return f"/vmraw/{name}/"
+    prefix = _vm_path_prefix(name)
+    return f"{prefix}/."
 
 
 def _build_vm_url(name: str) -> str:
