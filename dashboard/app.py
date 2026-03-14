@@ -951,6 +951,9 @@ def _verify_v2_token(token_b64: str) -> bool:
 def v2_auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        cfg_pw = _get_v2_password()
+        if not cfg_pw:
+            return fn(*args, **kwargs)
         # Accept Bearer token in Authorization header or X-Auth-Token
         auth = request.headers.get('Authorization','')
         token = None
