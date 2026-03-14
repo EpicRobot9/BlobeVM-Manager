@@ -1390,7 +1390,7 @@ def _build_vm_embed_url(name: str) -> str:
     if _is_direct_mode():
         return _build_vm_url(name)
     prefix = _vm_path_prefix(name)
-    return f"{prefix}/vnc/index.html?autoconnect=1&resize=remote&clipboard_up=true&clipboard_down=true&clipboard_seamless=true&show_control_bar=true&path={prefix}/websockify"
+    return f"{prefix}/"
 
 
 def _build_vm_url(name: str) -> str:
