@@ -130,6 +130,46 @@ apply_env_overrides() {
   fi
 }
 
+prompt_dashboard_auth() {
+  [[ "${ENABLE_DASHBOARD:-0}" -eq 1 ]] || return 0
+
+  if [[ -n "${BLOBEDASH_PASS:-}" ]]; then
+    [[ -z "${BLOBEDASH_USER:-}" ]] && BLOBEDASH_USER="admin"
+    return 0
+  fi
+
+  if [[ "${ASSUME_DEFAULTS:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  local dash_auth_response=""
+  read -rp "Protect the BlobeVM dashboard with a login? [Y/n]: " dash_auth_response || true
+  if [[ -z "$dash_auth_response" || "${dash_auth_response,,}" =~ ^y(es)?$ ]]; then
+    local dash_user dash_pass dash_pass_confirm dash_user_input
+    dash_user="${BLOBEDASH_USER:-admin}"
+    read -rp "BlobeVM dashboard username [${dash_user}]: " dash_user_input || true
+    [[ -n "${dash_user_input:-}" ]] && dash_user="${dash_user_input}"
+    while true; do
+      read -rsp "Preferred dashboard password: " dash_pass; echo
+      if [[ -z "$dash_pass" ]]; then
+        echo "Password cannot be empty." >&2
+        continue
+      fi
+      read -rsp "Confirm dashboard password: " dash_pass_confirm; echo
+      if [[ "$dash_pass" != "$dash_pass_confirm" ]]; then
+        echo "Passwords did not match. Try again." >&2
+        continue
+      fi
+      break
+    done
+    BLOBEDASH_USER="$dash_user"
+    BLOBEDASH_PASS="$dash_pass"
+  else
+    BLOBEDASH_USER=""
+    BLOBEDASH_PASS=""
+  fi
+}
+
 prompt_config() {
   echo "--- BlobeVM Host Configuration ---"
 
@@ -252,11 +292,16 @@ prompt_config() {
     echo "  HSTS:        $([[ "${HSTS_ENABLED}" -eq 1 ]] && echo yes || echo no)"
   fi
   echo "  Web Dashboard: $([[ "${ENABLE_DASHBOARD}" -eq 1 ]] && echo yes || echo no) (set DISABLE_DASHBOARD=1 to skip)"
+  if [[ -n "${BLOBEDASH_PASS:-}" ]]; then
+    echo "  BlobeVM Dashboard Auth: enabled (user: ${BLOBEDASH_USER:-admin})"
+  else
+    echo "  BlobeVM Dashboard Auth: disabled"
+  fi
   if [[ -n "${TRAEFIK_DASHBOARD_AUTH}" ]]; then
     local summary_user="${DASH_AUTH_USER:-${TRAEFIK_DASHBOARD_AUTH%%:*}}"
-    echo "  Dashboard Auth: enabled (user: ${summary_user:-admin})"
+    echo "  Traefik Dashboard Auth: enabled (user: ${summary_user:-admin})"
   else
-    echo "  Dashboard Auth: disabled"
+    echo "  Traefik Dashboard Auth: disabled"
   fi
   echo
 }
@@ -1390,6 +1435,8 @@ install_manager() {
     echo "BASE_PATH=$(sh_q "${base_path}")";
     echo "FORCE_HTTPS=$(sh_q "${FORCE_HTTPS}")";
     echo "TRAEFIK_DASHBOARD_AUTH=$(sh_q "${TRAEFIK_DASHBOARD_AUTH}")";
+    echo "BLOBEDASH_USER=$(sh_q "${BLOBEDASH_USER:-}")";
+    echo "BLOBEDASH_PASS=$(sh_q "${BLOBEDASH_PASS:-}")";
     echo "HSTS_ENABLED=$(sh_q "${HSTS_ENABLED}")";
     echo "ENABLE_DASHBOARD=$(sh_q "${ENABLE_DASHBOARD}")";
     echo "HTTP_PORT=$(sh_q "${HTTP_PORT}")";

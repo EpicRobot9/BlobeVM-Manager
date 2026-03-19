@@ -216,7 +216,7 @@ sed -i '/dashboard:/,/^$/d' docker-compose.yml
 ```
 
 Dashboard internal auth (optional):
-Set credentials before (re)deploying the dashboard so all UI/API requests require them:
+The installer can prompt for your preferred dashboard username/password during setup. You can also set credentials before (re)deploying the dashboard so all UI/API requests require them:
 ```
 export BLOBEDASH_USER=admin
 export BLOBEDASH_PASS='StrongPassword123'
