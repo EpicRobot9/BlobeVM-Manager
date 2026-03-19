@@ -186,7 +186,12 @@ ensure_logfile
 describe_plan
 confirm_or_exit
 
-# Default: disable Traefik unless explicitly set
+# Safe foolproof defaults for fresh installs; callers can override any of these.
+export BLOBEVM_ASSUME_DEFAULTS="${BLOBEVM_ASSUME_DEFAULTS:-1}"
+export BLOBEVM_ENABLE_DASHBOARD="${BLOBEVM_ENABLE_DASHBOARD:-1}"
+export BLOBEVM_AUTO_CREATE_VM="${BLOBEVM_AUTO_CREATE_VM:-1}"
+export BLOBEVM_INITIAL_VM_NAME="${BLOBEVM_INITIAL_VM_NAME:-testvm}"
+# Default to direct mode unless explicitly overridden; avoids 80/443 conflicts on random VPSes.
 export BLOBEVM_NO_TRAEFIK="${BLOBEVM_NO_TRAEFIK:-1}"
 
 install_git_if_missing

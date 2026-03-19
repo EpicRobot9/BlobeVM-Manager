@@ -106,6 +106,7 @@ Commands:
   restart <name>
   status <name>              # print container status and URL
   check [--no-fix] <name>    # HTTP check the VM URL; optional --no-fix to skip auto-resolve
+  doctor                     # verify install, runtime dependencies, routing, and dashboard health
   delete <name>
   delete-all-instances [--yes] # delete all VM instances and containers (keeps image/stack)
   rename <old> <new>
@@ -280,13 +281,21 @@ common_labels() {
     fi
     [[ "$prefix_path" != /* ]] && prefix_path="/$prefix_path"
     prefix_path="${prefix_path%/}"
+    local host_path_mw="${name}-host-path"
+    local host_router_mw="${host_path_mw}"
+    if [[ -n "$auth_mw" ]]; then host_router_mw="${host_path_mw},${auth_mw}"; fi
+
+    labels+=(
+      "--label=traefik.http.middlewares.${host_path_mw}.replacepathregex.regex=^/(.*)"
+      "--label=traefik.http.middlewares.${host_path_mw}.replacepathregex.replacement=${prefix_path}/\${1}"
+    )
 
     labels+=(
       "--label=traefik.http.routers.${name}.rule=Host(\`$host_override\`)"
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}.service=${name}"
-      $(maybe_auth_router_label "${name}" "$auth_mw")
+      "--label=traefik.http.routers.${name}.middlewares=${host_router_mw}"
       "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
@@ -315,7 +324,7 @@ common_labels() {
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-secure.service=${name}"
-        $(maybe_auth_router_label "${name}-secure" "$auth_mw")
+        "--label=traefik.http.routers.${name}-secure.middlewares=${host_router_mw}"
         "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
         "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
@@ -352,6 +361,13 @@ common_labels() {
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
       "--label=traefik.http.routers.${name}-path.service=${name}-path"
       $(maybe_auth_router_label "${name}-path" "$auth_mw")
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.regex=^/vmraw/${name}/?(.*)"
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.replacement=${prefix_path}/\${1}"
+      "--label=traefik.http.routers.${name}-raw.rule=PathPrefix(\`/vmraw/${name}\`)"
+      "--label=traefik.http.routers.${name}-raw.entrypoints=web"
+      "--label=traefik.http.services.${name}-raw.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-raw.service=${name}-raw"
+      "--label=traefik.http.routers.${name}-raw.middlewares=${name}-raw-path"
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
@@ -367,10 +383,17 @@ common_labels() {
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
         "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
         $(maybe_auth_router_label "${name}-path-secure" "$auth_mw")
+        "--label=traefik.http.routers.${name}-raw-secure.rule=PathPrefix(\`/vmraw/${name}\`)"
+        "--label=traefik.http.routers.${name}-raw-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-raw-secure.tls=true"
+        "--label=traefik.http.services.${name}-raw-secure.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-raw-secure.service=${name}-raw"
+        "--label=traefik.http.routers.${name}-raw-secure.middlewares=${name}-raw-path"
       )
       labels+=(
         "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
         "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
+        "--label=traefik.http.routers.${name}-raw-secure.tls.certresolver=myresolver"
       )
     fi
   else
@@ -725,6 +748,165 @@ cmd_check() {
     i=$((i+1))
   done
   echo "FAIL ${code} - $url"; exit 1
+}
+
+doctor_probe_url() {
+  local url="$1"
+  local headers code location
+  headers="$(mktemp)"
+  code=$(curl -k -sS -D "$headers" -o /dev/null -m 8 --max-redirs 0 -w '%{http_code}' "$url" 2>/dev/null || echo '000')
+  location=$(awk 'BEGIN{IGNORECASE=1} /^Location:/ {sub(/\r$/, "", $2); print $2; exit}' "$headers" 2>/dev/null || true)
+  rm -f "$headers"
+  printf '%s|%s\n' "$code" "$location"
+}
+
+cmd_doctor() {
+  local failures=0 warnings=0
+  local green='OK'
+  local yellow='WARN'
+  local red='FAIL'
+
+  report_ok() { printf '[%s] %s\n' "$green" "$1"; }
+  report_warn() { printf '[%s] %s\n' "$yellow" "$1"; warnings=$((warnings+1)); }
+  report_fail() { printf '[%s] %s\n' "$red" "$1"; failures=$((failures+1)); }
+
+  echo 'BlobeVM Manager Doctor'
+  echo '======================'
+
+  [[ -d "$STATE_DIR" ]] && report_ok "state dir present: $STATE_DIR" || report_fail "state dir missing: $STATE_DIR"
+  [[ -f "$ENV_FILE" ]] && report_ok "env file present: $ENV_FILE" || report_warn "env file missing: $ENV_FILE"
+
+  if command -v docker >/dev/null 2>&1; then
+    report_ok "docker CLI found: $(command -v docker)"
+    if docker info >/dev/null 2>&1; then
+      report_ok 'docker daemon reachable'
+    else
+      report_fail 'docker daemon not reachable (is Docker running?)'
+    fi
+  else
+    report_fail 'docker CLI not found'
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    report_ok 'jq found'
+  else
+    report_warn 'jq not found (metadata operations may fail)'
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    report_ok 'curl found'
+  else
+    report_warn 'curl not found (HTTP health checks unavailable)'
+  fi
+
+  if docker image inspect "${BLOBEVM_IMAGE:-blobevm:latest}" >/dev/null 2>&1; then
+    report_ok "image present: ${BLOBEVM_IMAGE:-blobevm:latest}"
+  else
+    report_warn "image missing: ${BLOBEVM_IMAGE:-blobevm:latest}"
+  fi
+
+  if [[ -x /usr/local/bin/blobe-vm-manager ]]; then
+    report_ok 'manager binary installed at /usr/local/bin/blobe-vm-manager'
+  else
+    report_warn 'manager binary missing at /usr/local/bin/blobe-vm-manager'
+  fi
+
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    report_ok 'mode: direct (no Traefik)'
+  else
+    report_ok "mode: Traefik/proxy (network: ${TRAEFIK_NETWORK:-proxy})"
+    if docker network inspect "${TRAEFIK_NETWORK:-proxy}" >/dev/null 2>&1; then
+      report_ok "proxy network exists: ${TRAEFIK_NETWORK:-proxy}"
+    else
+      report_fail "proxy network missing: ${TRAEFIK_NETWORK:-proxy}"
+    fi
+    if docker ps --format '{{.Names}}' | grep -Eq '^(traefik|traefik-traefik-1)$'; then
+      report_ok 'Traefik container running'
+    else
+      report_warn 'Traefik container not detected'
+    fi
+  fi
+
+  if docker ps --format '{{.Names}}' | grep -qx 'blobedash'; then
+    report_ok 'dashboard container running: blobedash'
+  elif docker ps -a --format '{{.Names}}' | grep -qx 'blobedash'; then
+    report_warn 'dashboard container exists but is not running: blobedash'
+  else
+    report_warn 'dashboard container not found: blobedash'
+  fi
+
+  local durl
+  durl="$(dashboard_url)"
+  if [[ "$durl" != "(dashboard disabled or unknown port)" ]] && command -v curl >/dev/null 2>&1; then
+    local dprobe dcode dloc
+    dprobe="$(doctor_probe_url "$durl")"
+    dcode="${dprobe%%|*}"
+    dloc="${dprobe#*|}"
+    if [[ "$dcode" =~ ^2[0-9][0-9]$ ]]; then
+      report_ok "dashboard reachable: $durl (${dcode})"
+    elif [[ "$dcode" =~ ^3[0-9][0-9]$ ]]; then
+      report_warn "dashboard redirects: $durl (${dcode} -> ${dloc:-<unknown>})"
+    else
+      report_warn "dashboard not reachable: $durl (${dcode})"
+    fi
+  else
+    report_warn 'dashboard URL unavailable'
+  fi
+
+  ensure_instance_dir
+  local instance_count=0 running_count=0
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    instance_count=$((instance_count+1))
+    local name cname url code
+    name="$(basename "$d")"
+    cname="$(container_name "$name")"
+    local vm_running=0
+    if docker ps --format '{{.Names}}' | grep -qx "$cname"; then
+      running_count=$((running_count+1))
+      vm_running=1
+      report_ok "VM running: $name"
+    elif docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+      report_ok "VM present but stopped: $name"
+    else
+      report_warn "VM metadata exists but container is missing: $name"
+    fi
+
+    if command -v curl >/dev/null 2>&1; then
+      local probe loc
+      url="$(vm_url "$name")"
+      [[ "$url" != */ ]] && url="${url}/"
+      probe="$(doctor_probe_url "$url")"
+      code="${probe%%|*}"
+      loc="${probe#*|}"
+      if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
+        report_ok "VM reachable: $name -> $url (${code})"
+      elif [[ "$code" =~ ^3[0-9][0-9]$ && "$loc" == *"/portal/login"* ]]; then
+        report_ok "VM reachable (auth required): $name -> $url (${code} -> ${loc})"
+      elif [[ "$vm_running" -eq 0 && "$code" =~ ^(000|404)$ ]]; then
+        report_ok "VM offline as expected while stopped: $name -> $url (${code})"
+      elif [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
+        report_warn "VM redirects: $name -> $url (${code} -> ${loc:-<unknown>})"
+      else
+        report_warn "VM not reachable: $name -> $url (${code})"
+      fi
+    fi
+  done
+
+  if [[ "$instance_count" -eq 0 ]]; then
+    report_warn 'no VM instances found'
+  else
+    report_ok "instances discovered: ${instance_count} (${running_count} running)"
+  fi
+
+  echo
+  echo "Summary: ${failures} failure(s), ${warnings} warning(s)"
+  if [[ "$failures" -gt 0 ]]; then
+    echo 'Doctor result: unhealthy'
+    return 1
+  fi
+  echo 'Doctor result: healthy enough'
 }
 
 cmd_delete() {
@@ -1273,6 +1455,7 @@ main() {
     restart) cmd_restart "$@" ;;
     status) cmd_status "$@" ;;
     check)  cmd_check "$@" ;;
+    doctor) cmd_doctor "$@" ;;
     delete) cmd_delete "$@" ;;
   delete-all-instances) cmd_delete_all_instances "$@" ;;
     rename) cmd_rename "$@" ;;
@@ -1366,3 +1549,4 @@ cmd_nuke() {
 }
 
 main "$@"
+

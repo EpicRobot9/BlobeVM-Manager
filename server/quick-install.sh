@@ -36,6 +36,9 @@ rm -rf "$TMP_DIR"
 echo "Done. One-shot onboarding finished."
 if command -v blobe-vm-manager >/dev/null 2>&1; then
   echo
+  echo "Running post-install doctor..."
+  blobe-vm-manager doctor || true
+  echo
   echo "Current VMs:"
   blobe-vm-manager list || true
 fi

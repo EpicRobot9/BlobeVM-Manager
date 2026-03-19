@@ -28,10 +28,17 @@ Run this on your server to clone the repo and start the one-shot installer:
 curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/install-blobevm.sh | sudo bash
 ```
 
-By default, the quick installer now:
+After install, verify everything with:
+```bash
+blobe-vm-manager doctor
+```
+
+By default, the bootstrap installer now:
 - accepts safe defaults for a fresh setup
-- deploys both dashboard UIs
+- deploys the dashboard
 - creates a starter VM named `testvm`
+- prefers direct mode by default to avoid random 80/443 conflicts
+- runs `blobe-vm-manager doctor` after install so problems are obvious immediately
 - prints direct links for:
   - Dashboard v2
   - Old dashboard
@@ -101,6 +108,7 @@ blobe-vm-manager status alpha    # prints container status and URL
 # 2) HTTP check via manager
 blobe-vm-manager check alpha           # returns OK/FAIL; auto-resolves common 404s by recreating
 blobe-vm-manager check --no-fix alpha  # report-only (no auto-resolve)
+blobe-vm-manager doctor                # verify install, docker, dashboard, routing, and VM health
 # 3) Docker (optional)
 docker ps --filter name=blobevm_alpha --format '{{.Names}} {{.Status}}'
 

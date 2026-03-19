@@ -30,9 +30,18 @@ blobe-vm-manager restart <name>
 blobe-vm-manager status <name>
 blobe-vm-manager check <name>
 blobe-vm-manager check --no-fix <name>
+blobe-vm-manager doctor
 blobe-vm-manager delete <name>
 blobe-vm-manager rename <old> <new>
 ```
+
+`doctor` checks the local install and runtime health, including:
+- state dir / env file presence
+- docker CLI + daemon reachability
+- image presence
+- Traefik/direct-mode basics
+- dashboard container + dashboard URL health
+- each VM container and URL reachability
 
 ## URL/routing helpers
 
