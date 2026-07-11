@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { login } from '../lib/fetchWrapper'
 
 export default function Login({onLogin}){
+  const [username,setUsername] = useState('')
   const [pw,setPw] = useState('')
   const [err,setErr] = useState('')
   const [loading,setLoading] = useState(false)
@@ -11,7 +12,7 @@ export default function Login({onLogin}){
     setErr('')
     setLoading(true)
     try{
-      const ok = await login(pw)
+      const ok = await login(username, pw)
       setLoading(false)
       if(ok){ onLogin && onLogin(); return }
       setErr('Invalid password')
@@ -24,11 +25,14 @@ export default function Login({onLogin}){
       <h2 style={{marginTop:0}}>Welcome back</h2>
       <p style={{color:'var(--muted)'}}>Sign in to access the BlobeVM Dashboard.</p>
       <form onSubmit={submit} style={{display:'flex',flexDirection:'column',gap:12}}>
-        <input autoFocus placeholder="Admin password" type="password" value={pw} onChange={e=>setPw(e.target.value)} style={{padding:12,borderRadius:8,border:'1px solid rgba(255,255,255,0.04)',outline:'none'}} />
+        <label htmlFor="dashboard-username">Admin username</label>
+        <input id="dashboard-username" autoFocus autoComplete="username" value={username} onChange={e=>setUsername(e.target.value)} style={{padding:12,borderRadius:8,border:'1px solid rgba(255,255,255,0.04)',outline:'none'}} />
+        <label htmlFor="dashboard-password">Admin password</label>
+        <input id="dashboard-password" autoComplete="current-password" type="password" value={pw} onChange={e=>setPw(e.target.value)} style={{padding:12,borderRadius:8,border:'1px solid rgba(255,255,255,0.04)',outline:'none'}} />
         <div style={{display:'flex',gap:10,alignItems:'center'}}>
           <button className="card-elev" style={{flex:1,background:'linear-gradient(90deg,var(--blue-500),var(--blue-600))',border:'none',padding:12,borderRadius:8,color:'#fff'}} disabled={loading}>{loading? 'Signing in...':'Sign in'}</button>
         </div>
-        {err && <div style={{color:'#ffb4b4'}}>{err}</div>}
+        {err && <div role="alert" style={{color:'#ffb4b4'}}>{err}</div>}
       </form>
     </div>
   )

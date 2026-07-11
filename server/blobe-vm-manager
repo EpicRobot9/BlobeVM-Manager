@@ -248,8 +248,12 @@ vm_url() {
 
 common_labels() {
   local name="$1"
+  # This ownership marker is intentionally present in both proxy and direct
+  # modes. Dashboard cleanup is restricted to this label.
+  local labels=("--label=com.blobevm.managed=1")
   # In direct mode, no proxy labels are needed
   if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    printf '%s ' "${labels[@]}"
     return 0
   fi
   local host_override path_override access_mode
@@ -257,10 +261,8 @@ common_labels() {
   path_override="$(get_meta "$name" path_override || true)"
   access_mode="$(get_meta "$name" access_mode || true)"
   [[ -z "$access_mode" ]] && access_mode="public"
-  local labels=()
   labels+=("--label=traefik.docker.network=${TRAEFIK_NETWORK:-proxy}")
   labels+=("--label=traefik.enable=true")
-  labels+=("--label=com.blobevm.managed=1")
 
   local auth_mw=""
   if [[ "$access_mode" == "restricted" ]]; then

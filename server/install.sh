@@ -17,6 +17,7 @@ set -o errtrace
 #   BLOBEVM_HSTS, BLOBEVM_TRAEFIK_NETWORK, BLOBEVM_REUSE_SETTINGS
 #   BLOBEVM_AUTO_CREATE_VM, BLOBEVM_INITIAL_VM_NAME, BLOBEVM_ENABLE_TLS
 #   BLOBEVM_ASSUME_DEFAULTS (accept safe defaults during prompts)
+#   BLOBEVM_ALLOW_INSECURE_DASHBOARD=1 (explicitly opt out of dashboard auth)
 #   DISABLE_DASHBOARD (legacy flag to skip dashboard deployment)
 #   BLOBEVM_NO_TRAEFIK (1 to run without Traefik; VMs get unique high ports)
 #   BLOBEVM_DIRECT_PORT_START (first port to try in direct/no-Traefik mode; default 20000)
@@ -133,41 +134,50 @@ apply_env_overrides() {
 prompt_dashboard_auth() {
   [[ "${ENABLE_DASHBOARD:-0}" -eq 1 ]] || return 0
 
+  if [[ "${BLOBEVM_ALLOW_INSECURE_DASHBOARD:-0}" == "1" ]]; then
+    BLOBEDASH_USER=""
+    BLOBEDASH_PASS=""
+    echo "WARNING: dashboard authentication is disabled by BLOBEVM_ALLOW_INSECURE_DASHBOARD=1." >&2
+    return 0
+  fi
+
   if [[ -n "${BLOBEDASH_PASS:-}" ]]; then
     [[ -z "${BLOBEDASH_USER:-}" ]] && BLOBEDASH_USER="admin"
     return 0
   fi
 
   if [[ "${ASSUME_DEFAULTS:-0}" == "1" ]]; then
+    BLOBEDASH_USER="${BLOBEDASH_USER:-admin}"
+    BLOBEDASH_PASS="$(openssl rand -base64 24 | tr -d '\n')"
+    echo "Generated dashboard credentials (shown once): ${BLOBEDASH_USER} / ${BLOBEDASH_PASS}" >&2
     return 0
   fi
 
-  local dash_auth_response=""
-  read -rp "Protect the BlobeVM dashboard with a login? [Y/n]: " dash_auth_response || true
-  if [[ -z "$dash_auth_response" || "${dash_auth_response,,}" =~ ^y(es)?$ ]]; then
-    local dash_user dash_pass dash_pass_confirm dash_user_input
-    dash_user="${BLOBEDASH_USER:-admin}"
-    read -rp "BlobeVM dashboard username [${dash_user}]: " dash_user_input || true
-    [[ -n "${dash_user_input:-}" ]] && dash_user="${dash_user_input}"
-    while true; do
-      read -rsp "Preferred dashboard password: " dash_pass; echo
-      if [[ -z "$dash_pass" ]]; then
-        echo "Password cannot be empty." >&2
-        continue
-      fi
-      read -rsp "Confirm dashboard password: " dash_pass_confirm; echo
-      if [[ "$dash_pass" != "$dash_pass_confirm" ]]; then
-        echo "Passwords did not match. Try again." >&2
-        continue
-      fi
-      break
-    done
-    BLOBEDASH_USER="$dash_user"
-    BLOBEDASH_PASS="$dash_pass"
-  else
-    BLOBEDASH_USER=""
-    BLOBEDASH_PASS=""
-  fi
+  local dash_user dash_pass dash_pass_confirm dash_user_input
+  dash_user="${BLOBEDASH_USER:-admin}"
+  read -rp "BlobeVM dashboard username [${dash_user}]: " dash_user_input || true
+  [[ -n "${dash_user_input:-}" ]] && dash_user="${dash_user_input}"
+  while true; do
+    read -rsp "Preferred dashboard password: " dash_pass; echo
+    if [[ ${#dash_pass} -lt 12 ]]; then
+      echo "Password must be at least 12 characters." >&2
+      continue
+    fi
+    read -rsp "Confirm dashboard password: " dash_pass_confirm; echo
+    if [[ "$dash_pass" != "$dash_pass_confirm" ]]; then
+      echo "Passwords did not match. Try again." >&2
+      continue
+    fi
+    break
+  done
+  BLOBEDASH_USER="$dash_user"
+  BLOBEDASH_PASS="$dash_pass"
+}
+
+ensure_dashboard_secrets() {
+  [[ "${ENABLE_DASHBOARD:-0}" -eq 1 ]] || return 0
+  [[ -n "${DASH_V2_SECRET:-}" ]] || DASH_V2_SECRET="$(openssl rand -hex 32)"
+  [[ -n "${BLOBEVM_USER_SECRET:-}" ]] || BLOBEVM_USER_SECRET="$(openssl rand -hex 32)"
 }
 
 prompt_config() {
@@ -1337,6 +1347,9 @@ deploy_dashboard_direct() {
     -v /opt/blobe-vm/dashboard/app.py:/app/app.py:ro \
     -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
     -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
+    -e DASH_V2_SECRET="${DASH_V2_SECRET:-}" \
+    -e BLOBEVM_USER_SECRET="${BLOBEVM_USER_SECRET:-}" \
+    -e BLOBEVM_ALLOW_INSECURE_DASHBOARD="${BLOBEVM_ALLOW_INSECURE_DASHBOARD:-0}" \
     -e HOST_DOCKER_BIN="${docker_bin}" \
   python:3.11-slim \
   bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
@@ -1437,6 +1450,9 @@ install_manager() {
     echo "TRAEFIK_DASHBOARD_AUTH=$(sh_q "${TRAEFIK_DASHBOARD_AUTH}")";
     echo "BLOBEDASH_USER=$(sh_q "${BLOBEDASH_USER:-}")";
     echo "BLOBEDASH_PASS=$(sh_q "${BLOBEDASH_PASS:-}")";
+    echo "DASH_V2_SECRET=$(sh_q "${DASH_V2_SECRET:-}")";
+    echo "BLOBEVM_USER_SECRET=$(sh_q "${BLOBEVM_USER_SECRET:-}")";
+    echo "BLOBEVM_ALLOW_INSECURE_DASHBOARD=$(sh_q "${BLOBEVM_ALLOW_INSECURE_DASHBOARD:-0}")";
     echo "HSTS_ENABLED=$(sh_q "${HSTS_ENABLED}")";
     echo "ENABLE_DASHBOARD=$(sh_q "${ENABLE_DASHBOARD}")";
     echo "HTTP_PORT=$(sh_q "${HTTP_PORT}")";
@@ -1657,6 +1673,8 @@ main() {
     prompt_config
   fi
   BASE_PATH=${BASE_PATH:-/vm}
+  prompt_dashboard_auth
+  ensure_dashboard_secrets
   install_prereqs
   # External Traefik only if we're not already configured to skip and not in direct mode
   if [[ "${SKIP_TRAEFIK:-0}" -ne 1 && "${NO_TRAEFIK:-0}" -ne 1 ]]; then

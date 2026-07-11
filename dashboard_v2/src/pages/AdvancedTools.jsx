@@ -28,7 +28,7 @@ export default function AdvancedTools(){
           <select value={selected} onChange={e=>setSelected(e.target.value)} style={{padding:8,borderRadius:8}}>
             {vms.map(v=> <option key={v} value={v}>{v}</option>)}
           </select>
-          <a href="/dashboard/vm/" target="_blank" rel="noreferrer"><Button>Open VM Manager</Button></a>
+          <a href={selected ? `/dashboard/vm/${encodeURIComponent(selected)}/` : '/dashboard'} target="_blank" rel="noreferrer"><Button>Open selected VM</Button></a>
         </div>
 
         <div style={{marginTop:6}}>

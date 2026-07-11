@@ -81,7 +81,7 @@ export default function Home(){
         </div>
       </div>
 
-      <div style={{marginTop:16,display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:14}}>
+      <div className="home-metric-grid" style={{marginTop:16,gap:14}}>
         <div className="glass-card card-elev">
           <div style={{fontSize:12,color:'var(--muted)'}}>CPU Usage</div>
           <div style={{fontSize:18,fontWeight:700}}>{loading ? 'Loading…' : (stats && stats.cpu ? `${stats.cpu.usage}%` : '—')}</div>

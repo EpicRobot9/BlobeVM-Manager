@@ -31,6 +31,7 @@ export default function Settings(){
     localStorage.setItem('nbv2_announce_cpu_absolute', String(cpuAbs))
     localStorage.setItem('nbv2_announce_mem_absolute', String(memAbs))
     localStorage.setItem('nbv2_announce_cooldown', String(cooldown))
+    window.dispatchEvent(new Event('nbv2:settings'))
     setFeedback('Saved')
     // hint to consumer components to re-read (they read from localStorage on each poll)
   }
@@ -39,7 +40,7 @@ export default function Settings(){
     <div>
       <h1 style={{marginTop:0}}>Settings</h1>
       <div className="glass-card">
-        <div style={{display:'grid',gridTemplateColumns:'1fr 320px',gap:16,alignItems:'start'}}>
+        <div className="settings-layout" style={{display:'grid',gap:16,alignItems:'start'}}>
           <div>
             <div style={{fontSize:13,color:'var(--muted)',marginBottom:8}}>Update & behavior</div>
             <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
@@ -86,10 +87,7 @@ export default function Settings(){
           <div>
             <div style={{fontSize:13,color:'var(--muted)',marginBottom:8}}>Admin password</div>
             <div style={{background:'rgba(255,255,255,0.02)',padding:12,borderRadius:8,color:'var(--muted)'}}>
-              The admin password for this new dashboard is stored and managed by the original dashboard. To change it, open the original dashboard settings page.
-            </div>
-            <div style={{marginTop:12}}>
-              <a href="/dashboard/settings" target="_blank" rel="noreferrer"><Button>Open old dashboard settings</Button></a>
+              Dashboard credentials are managed by the installer in <code>/opt/blobe-vm/.env</code>. Re-run the installer to rotate them.
             </div>
           </div>
         </div>

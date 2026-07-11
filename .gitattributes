@@ -1,0 +1,12 @@
+# Linux runtime scripts must keep LF when checked out on Windows.
+*.sh text eol=lf
+Dockerfile text eol=lf
+server/blobe-vm-manager text eol=lf
+
+# Source and configuration files are text; leave developers' editor choices alone.
+*.py text
+*.js text
+*.jsx text
+*.json text
+*.yml text
+*.yaml text

@@ -1,3 +1,13 @@
 __pycache__/
 *.pyc
-dashboard_v2/dist/assets/index-*.js
+/dashboard_v2/node_modules/
+/.ruff_cache/
+/.pytest_cache/
+/.coverage
+/dashboard/flask.log
+/dashboard/*.log
+/dashboard/*.sqlite3
+/dashboard/jobs.sqlite3
+/dashboard_v2/last_error.txt
+/dashboard_v2/test-results/
+/tmp/

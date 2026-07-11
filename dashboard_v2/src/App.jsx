@@ -13,28 +13,47 @@ import Settings from './pages/Settings'
 import APIInfo from './pages/APIInfo'
 import AdvancedTools from './pages/AdvancedTools'
 import Users from './pages/Users'
-import { isAuthenticated, setToken } from './lib/auth'
+import { authStatus, logout } from './lib/fetchWrapper'
 
 export default function App(){
   const [collapsed, setCollapsed] = useState(()=>{
     try{ return JSON.parse(localStorage.getItem('nbv2_sidebar_collapsed') || 'false') }catch(e){ return false }
   })
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [authed, setAuthed] = useState(false)
+  const [auth, setAuth] = useState({loading:true, allowed:false, required:true})
+  const [animations, setAnimations] = useState(()=>localStorage.getItem('nbv2_animations') !== '0')
   const navigate = useNavigate()
+  // Hooks must always run in the same order; location used to sit below the
+  // login return and crashed immediately after a successful login.
+  const location = useLocation()
 
   useEffect(()=>{
-    setAuthed(isAuthenticated())
+    let live = true
+    authStatus().then(result => {
+      if(!live) return
+      setAuth({loading:false, allowed: result.authRequired === false || result.ok === true, required: result.authRequired !== false, error: result.error})
+    }).catch(() => live && setAuth({loading:false, allowed:false, required:true, error:'Unable to check dashboard session'}))
+    return ()=>{ live = false }
   },[])
 
-  if(!authed){
-    return <div className="app-shell"><div className="main" style={{display:'flex',alignItems:'center',justifyContent:'center'}}><Login onLogin={()=>{ setAuthed(true); navigate('/') }} /></div></div>
+  useEffect(()=>{
+    const refresh = () => setAnimations(localStorage.getItem('nbv2_animations') !== '0')
+    window.addEventListener('nbv2:settings', refresh)
+    return ()=>window.removeEventListener('nbv2:settings', refresh)
+  }, [])
+
+  if(auth.loading){
+    return <div className="app-shell"><main className="main loading-screen" role="status">Checking dashboard session…</main></div>
   }
 
-  const location = useLocation()
+  if(!auth.allowed){
+    return <div className="app-shell"><main className="main login-shell"><Login onLogin={()=>{ setAuth({loading:false, allowed:true, required:true}); navigate('/') }} />{auth.error && <p role="alert">{auth.error}</p>}</main></div>
+  }
+
   return (
     <ToastProvider>
-    <div className="app-shell">
+    <div className="app-shell" data-animations={animations ? 'on' : 'off'}>
+      {mobileOpen && <button className="mobile-backdrop" aria-label="Close navigation" onClick={()=>setMobileOpen(false)} />}
       <aside className={`sidebar ${collapsed? 'collapsed':''} ${mobileOpen? 'mobile-open':''}`}>
         <Sidebar collapsed={collapsed} onCollapse={()=>{
           const next = !collapsed
@@ -47,7 +66,7 @@ export default function App(){
           const next = !collapsed
           try{ localStorage.setItem('nbv2_sidebar_collapsed', JSON.stringify(next)) }catch(e){}
           setCollapsed(next)
-        }} onToggleMobile={()=>setMobileOpen(v=>!v)} onLogout={()=>{ setToken(null); setAuthed(false); navigate('/login') }} /></div>
+        }} onToggleMobile={()=>setMobileOpen(v=>!v)} onLogout={async ()=>{ await logout(); setAuth({loading:false, allowed:false, required:true}); navigate('/login') }} /></div>
         <main className="main">
           <div key={location.pathname} className="page">
             <Routes>

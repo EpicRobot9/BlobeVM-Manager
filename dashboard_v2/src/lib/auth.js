@@ -1,8 +1,5 @@
-const TOKEN_KEY = 'nbv2_token'
-
-export function setToken(t){
-  if(!t){ localStorage.removeItem(TOKEN_KEY); return }
-  localStorage.setItem(TOKEN_KEY, t)
-}
-export function getToken(){ return localStorage.getItem(TOKEN_KEY) }
-export function isAuthenticated(){ return !!getToken() }
+// Sessions are deliberately HttpOnly cookies. Never mirror them into browser
+// storage where an injected script could steal an admin credential.
+export function setToken(){ /* legacy no-op retained for import compatibility */ }
+export function getToken(){ return '' }
+export function isAuthenticated(){ return false }

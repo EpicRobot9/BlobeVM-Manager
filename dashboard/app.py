@@ -3,6 +3,7 @@ import os, json, subprocess, shlex, base64, socket, threading, time, sqlite3, se
 import shutil
 import re
 from urllib import request as urlrequest, error as urlerror
+from urllib.parse import urlparse
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file, redirect
 import optimizer as dash_optimizer
@@ -14,46 +15,79 @@ except Exception:
 
 app = Flask(__name__)
  
-# --- Auth helpers (must be defined before route decorators) ---
-BUSER = os.environ.get('BLOBEDASH_USER')
-BPASS = os.environ.get('BLOBEDASH_PASS')
+# --- Admin authentication helpers (must be defined before route decorators) ---
+# BLOBEDASH_USER/PASS are the sole credentials for new installs. The legacy
+# dashboard password remains read-only migration support for existing hosts.
+_LOGIN_ATTEMPTS = {}
+_LOGIN_LOCK = threading.Lock()
+
+def _allow_insecure_dashboard() -> bool:
+    return os.environ.get('BLOBEVM_ALLOW_INSECURE_DASHBOARD') == '1'
+
+def _admin_credentials():
+    user = os.environ.get('BLOBEDASH_USER', '').strip()
+    password = os.environ.get('BLOBEDASH_PASS', '')
+    if user and password:
+        return user, password
+    legacy = _get_legacy_dashboard_password()
+    if legacy:
+        return 'admin', legacy
+    return None, None
 
 def need_auth():
-    return bool(BUSER and BPASS)
+    """Whether the dashboard is configured for protected access."""
+    return not _allow_insecure_dashboard()
+
+def _dashboard_secret() -> str:
+    # Never mint or verify a protected session with a public/default secret.
+    return os.environ.get('DASH_V2_SECRET', '').strip()
+
+def _request_is_https() -> bool:
+    forwarded = request.headers.get('X-Forwarded-Proto', '').split(',', 1)[0].strip().lower()
+    return bool(request.is_secure or forwarded == 'https')
+
+def _same_origin_request() -> bool:
+    origin = request.headers.get('Origin')
+    if not origin:
+        # Basic auth remains supported for existing scripts and non-browser CLI
+        # clients. Cookie sessions require a browser Origin on mutations.
+        return request.headers.get('Authorization', '').lower().startswith('basic ')
+    parsed = urlparse(origin)
+    return parsed.scheme in ('http', 'https') and parsed.netloc == request.host
 
 def check_auth(header: str) -> bool:
+    user_expected, password_expected = _admin_credentials()
+    if not user_expected or not password_expected:
+        return False
     if not header or not header.lower().startswith('basic '):
         return False
     try:
         raw = base64.b64decode(header.split(None,1)[1]).decode('utf-8')
         user, pw = raw.split(':',1)
-        return user == BUSER and pw == BPASS
+        return hmac.compare_digest(user, user_expected) and hmac.compare_digest(pw, password_expected)
     except Exception:
         return False
 
-def auth_required(fn):
+def admin_auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if need_auth():
-            # Allow basic auth via BUSER/BPASS or a valid v2 token (so dashboard_v2 can reuse existing APIs)
-            auth_header = request.headers.get('Authorization')
-            basic_ok = check_auth(auth_header)
-            token_ok = False
-            try:
-                if auth_header and auth_header.lower().startswith('bearer '):
-                    token = auth_header.split(None,1)[1].strip()
-                    token_ok = _verify_v2_token(token)
-                else:
-                    # also accept token via cookie
-                    token_cookie = request.cookies.get('Dashboard-Auth')
-                    if token_cookie:
-                        token_ok = _verify_v2_token(token_cookie)
-            except Exception:
-                token_ok = False
-            if not (basic_ok or token_ok):
-                return Response('Auth required', 401, {'WWW-Authenticate':'Basic realm="BlobeVM Dashboard"'})
+        if _allow_insecure_dashboard():
+            return fn(*args, **kwargs)
+        user, password = _admin_credentials()
+        if not user or not password or not _dashboard_secret():
+            return jsonify({'ok': False, 'error': 'Dashboard authentication is not configured'}), 503
+        basic_ok = check_auth(request.headers.get('Authorization'))
+        token_ok = _verify_v2_token(request.cookies.get('Dashboard-Auth', ''))
+        if not (basic_ok or token_ok):
+            return Response('Auth required', 401, {'WWW-Authenticate':'Basic realm="BlobeVM Dashboard"'})
+        if request.method not in ('GET', 'HEAD', 'OPTIONS') and not _same_origin_request():
+            return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
         return fn(*args, **kwargs)
     return wrapper
+
+# Compatibility name used by the legacy dashboard routes. New routes use the
+# explicit policy name above; there is deliberately no separate v2 policy.
+auth_required = admin_auth_required
 
 @app.get('/dashboard/api/v2status')
 @auth_required
@@ -599,7 +633,9 @@ function bulkUpdateAndRebuild(){
 function bulkDeleteAll(){
     var conf=prompt('Delete ALL VMs? This cannot be undone. Type DELETE to confirm.');
     if(conf!=='DELETE')return;
-    fetch('/dashboard/api/delete-all-instances',{method:'POST'}).then(load);
+    fetch('/dashboard/api/delete-all-instances',{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:'DELETE'})
+    }).then(load);
 }
 
 function bulkResetAll(){
@@ -918,27 +954,32 @@ async function checkVM(ev,name){
 </body></html>
 """
 
-# --- New dashboard (v2) auth helpers ---
-_DASH_V2_SECRET = os.environ.get('DASH_V2_SECRET') or os.environ.get('SECRET_KEY') or 'blobevm-secret'
-
-def _get_v2_password():
-    # read password stored in dashboard settings (managed by old dashboard)
+# --- Dashboard session helpers ---
+def _get_legacy_dashboard_password():
+    # Compatibility-only fallback for installations that predate BLOBEDASH_*.
+    # The old settings endpoint no longer writes this value.
     cfg = _load_dashboard_settings()
     return cfg.get('new_dashboard_admin_password')
 
 def _sign_v2_token(payload: str) -> str:
-    mac = hmac.new(_DASH_V2_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+    secret = _dashboard_secret()
+    if not secret:
+        raise ValueError('Dashboard session secret is not configured')
+    mac = hmac.new(secret.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
     token = f"{payload}:{mac}"
     return base64.urlsafe_b64encode(token.encode('utf-8')).decode('utf-8')
 
 def _verify_v2_token(token_b64: str) -> bool:
     try:
+        secret = _dashboard_secret()
+        if not secret:
+            return False
         raw = base64.urlsafe_b64decode(token_b64.encode('utf-8')).decode('utf-8')
         parts = raw.rsplit(':', 1)
         if len(parts) != 2:
             return False
         payload, mac = parts
-        expected = hmac.new(_DASH_V2_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+        expected = hmac.new(secret.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(mac, expected):
             return False
         # payload format: expiry:random
@@ -948,26 +989,11 @@ def _verify_v2_token(token_b64: str) -> bool:
     except Exception:
         return False
 
-def v2_auth_required(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        cfg_pw = _get_v2_password()
-        if not cfg_pw:
-            return fn(*args, **kwargs)
-        # Accept Bearer token in Authorization header or X-Auth-Token
-        auth = request.headers.get('Authorization','')
-        token = None
-        if auth.lower().startswith('bearer '):
-            token = auth.split(None,1)[1].strip()
-        if not token:
-            token = request.headers.get('X-Auth-Token') or request.cookies.get('Dashboard-Auth')
-        if not token or not _verify_v2_token(token):
-            return Response('Unauthorized', 401)
-        return fn(*args, **kwargs)
-    return wrapper
+v2_auth_required = admin_auth_required
 
 # --- Portal / per-VM user auth helpers ---
-_PORTAL_SECRET = os.environ.get('BLOBEVM_USER_SECRET') or _DASH_V2_SECRET
+def _portal_secret() -> str:
+    return os.environ.get('BLOBEVM_USER_SECRET', '').strip()
 
 def _users_db_path():
     return os.path.join(_state_dir(), 'dashboard_users.sqlite3')
@@ -1003,6 +1029,20 @@ def _init_users_db():
             status TEXT NOT NULL DEFAULT 'pending',
             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS one_pending_access_request
+        ON access_requests(username, vm_name) WHERE status = 'pending';
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            targets TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            finished_at INTEGER,
+            progress TEXT NOT NULL DEFAULT '',
+            output TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT ''
+        );
         ''')
         conn.commit()
     finally:
@@ -1034,6 +1074,79 @@ def _normalize_vm_names(vms):
         seen.add(name)
         out.append(name)
     return out
+
+def _known_vm_names():
+    try:
+        return {str(item.get('name')) for item in manager_json_list() if item.get('name')}
+    except Exception:
+        return set()
+
+def _validate_known_vm_names(names):
+    names = _normalize_vm_names(names)
+    if not names:
+        return
+    known = _known_vm_names()
+    missing = sorted(set(names) - known)
+    if missing:
+        raise ValueError('Unknown VM: ' + ', '.join(missing))
+
+def _job_row_to_dict(row):
+    result = dict(row)
+    result['targets'] = json.loads(result.get('targets') or '[]')
+    return result
+
+def _create_job(job_type: str, targets=None):
+    _init_users_db()
+    job_id = secrets.token_urlsafe(18)
+    now = int(time.time())
+    conn = _users_conn()
+    try:
+        conn.execute(
+            'INSERT INTO jobs (id, type, targets, status, created_at, progress) VALUES (?, ?, ?, ?, ?, ?)',
+            (job_id, job_type, json.dumps(_normalize_vm_names(targets)), 'queued', now, 'Queued'),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return job_id
+
+def _update_job(job_id: str, *, status=None, progress=None, output=None, error=None):
+    fields, values = [], []
+    for key, value in (('status', status), ('progress', progress), ('output', output), ('error', error)):
+        if value is not None:
+            fields.append(f'{key} = ?')
+            values.append(str(value)[:16000])
+    if status == 'running':
+        fields.append('started_at = ?')
+        values.append(int(time.time()))
+    if status in ('succeeded', 'failed'):
+        fields.append('finished_at = ?')
+        values.append(int(time.time()))
+    if not fields:
+        return
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        conn.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id = ?", [*values, job_id])
+        conn.commit()
+    finally:
+        conn.close()
+
+def _start_job(job_type: str, targets, work):
+    job_id = _create_job(job_type, targets)
+    def runner():
+        _update_job(job_id, status='running', progress='Running')
+        try:
+            result = work()
+            if isinstance(result, tuple):
+                ok, output = result
+            else:
+                ok, output = True, result or ''
+            _update_job(job_id, status='succeeded' if ok else 'failed', progress='Completed' if ok else 'Failed', output=output or '', error='' if ok else output or 'Operation failed')
+        except Exception as exc:
+            _update_job(job_id, status='failed', progress='Failed', error=str(exc))
+    threading.Thread(target=runner, daemon=True).start()
+    return job_id
 
 def _user_row_to_dict(row, vm_names=None):
     return {
@@ -1073,9 +1186,10 @@ def _get_user_by_username(username: str):
 def _create_user(username: str, password: str, assigned_vms=None, is_admin: bool=False):
     if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}', username or ''):
         raise ValueError('Username must be 3-64 chars using letters, numbers, dot, underscore, or dash')
-    if not password or len(password) < 4:
-        raise ValueError('Password must be at least 4 characters')
+    if not password or len(password) < 12:
+        raise ValueError('Password must be at least 12 characters')
     assigned_vms = _normalize_vm_names(assigned_vms)
+    _validate_known_vm_names(assigned_vms)
     _init_users_db()
     conn = _users_conn()
     try:
@@ -1097,13 +1211,14 @@ def _update_user(username: str, assigned_vms=None, password=None, disabled=None)
         if not row:
             raise ValueError('User not found')
         if password is not None:
-            if len(password) < 4:
-                raise ValueError('Password must be at least 4 characters')
+            if len(password) < 12:
+                raise ValueError('Password must be at least 12 characters')
             conn.execute('UPDATE users SET password_hash = ? WHERE id = ?', (_hash_user_password(password), row['id']))
         if disabled is not None:
             conn.execute('UPDATE users SET disabled = ? WHERE id = ?', (1 if disabled else 0, row['id']))
         if assigned_vms is not None:
             assigned_vms = _normalize_vm_names(assigned_vms)
+            _validate_known_vm_names(assigned_vms)
             conn.execute('DELETE FROM user_vm_access WHERE user_id = ?', (row['id'],))
             conn.executemany('INSERT OR IGNORE INTO user_vm_access (user_id, vm_name) VALUES (?, ?)', [(row['id'], vm) for vm in assigned_vms])
         conn.commit()
@@ -1126,16 +1241,22 @@ def _delete_user(username: str):
         conn.close()
 
 def _create_portal_token(username: str, is_admin: bool=False) -> str:
+    secret = _portal_secret()
+    if not secret:
+        raise ValueError('Portal session secret is not configured')
     exp = int(time.time() + 30*24*3600)
     payload = json.dumps({'u': username, 'exp': exp, 'admin': bool(is_admin)}, separators=(',', ':'))
-    mac = hmac.new(_PORTAL_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+    mac = hmac.new(secret.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(f"{payload}.{mac}".encode('utf-8')).decode('utf-8')
 
 def _verify_portal_token(token: str):
     try:
+        secret = _portal_secret()
+        if not secret:
+            return None
         raw = base64.urlsafe_b64decode(token.encode('utf-8')).decode('utf-8')
         payload, mac = raw.rsplit('.', 1)
-        expected = hmac.new(_PORTAL_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+        expected = hmac.new(secret.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(mac, expected):
             return None
         data = json.loads(payload)
@@ -1149,12 +1270,7 @@ def _verify_portal_token(token: str):
         return None
 
 def _current_portal_user():
-    auth = request.headers.get('Authorization', '')
-    token = None
-    if auth.lower().startswith('bearer '):
-        token = auth.split(None,1)[1].strip()
-    if not token:
-        token = request.cookies.get('Portal-Auth')
+    token = request.cookies.get('Portal-Auth')
     if not token:
         return None
     return _verify_portal_token(token)
@@ -1165,6 +1281,8 @@ def portal_auth_required(fn):
         user = _current_portal_user()
         if not user:
             return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+        if request.method not in ('GET', 'HEAD', 'OPTIONS') and not _same_origin_request():
+            return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
         request.portal_user = user
         return fn(*args, **kwargs)
     return wrapper
@@ -1182,11 +1300,18 @@ def _user_can_access_vm(user, name: str) -> bool:
     return name in set(user.get('assignedVms') or [])
 
 def _portal_login_redirect(next_url: str):
-    return redirect('/portal/login?next=' + urlrequest.quote(next_url or '/portal', safe='/:?=&%'))
+    return redirect('/portal/login?next=' + urlrequest.quote(_safe_portal_next(next_url), safe='/:?=&%'))
+
+def _safe_portal_next(next_url: str) -> str:
+    value = str(next_url or '/portal')
+    parsed = urlparse(value)
+    if not value.startswith('/') or value.startswith('//') or parsed.scheme or parsed.netloc:
+        return '/portal'
+    return value
 
 def _render_vm_denied(name: str, user):
     username = (user or {}).get('username', '')
-    page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Access required</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:640px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px;box-shadow:0 30px 80px rgba(0,0,0,.35)}}button,a{{display:inline-block;margin:8px 8px 0 0;padding:12px 16px;border-radius:12px;border:none;background:#2563eb;color:#fff;text-decoration:none;cursor:pointer}}.alt{{background:#334155}}textarea{{width:100%;min-height:110px;margin-top:12px;border-radius:12px;padding:12px;background:#020617;color:#fff;border:1px solid rgba(255,255,255,.1)}}</style></head><body><div class=card><h1>No access to {name}</h1><p>You are signed in as <strong>{username}</strong>, but this VM is restricted and not assigned to your account.</p><textarea id=note placeholder="Optional note for your access request"></textarea><div><button onclick="requestAccess()">Request access</button><a class=alt href="/portal">Open VM homepage</a><button class=alt onclick="logoutUser()">Log out</button></div><p id=msg style="opacity:.8;margin-top:12px"></p></div><script>async function requestAccess(){{const r=await fetch('/portal/api/request-access/{name}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{note:document.getElementById('note').value||''}})}});const j=await r.json().catch(()=>({{}}));document.getElementById('msg').textContent=j.ok?'Access request sent.':'Failed: '+(j.error||r.status)}} async function logoutUser(){{const portalBase='https://techexplore.us';await fetch(portalBase+'/portal/api/auth/logout',{{method:'POST',credentials:'include'}}).catch(()=>null);location.href=portalBase+'/portal/login';}}</script></body></html>'''
+    page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Access required</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:640px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px;box-shadow:0 30px 80px rgba(0,0,0,.35)}}button,a{{display:inline-block;margin:8px 8px 0 0;padding:12px 16px;border-radius:12px;border:none;background:#2563eb;color:#fff;text-decoration:none;cursor:pointer}}.alt{{background:#334155}}textarea{{width:100%;min-height:110px;margin-top:12px;border-radius:12px;padding:12px;background:#020617;color:#fff;border:1px solid rgba(255,255,255,.1)}}</style></head><body><div class=card><h1>No access to {name}</h1><p>You are signed in as <strong>{username}</strong>, but this VM is restricted and not assigned to your account.</p><textarea id=note placeholder="Optional note for your access request"></textarea><div><button onclick="requestAccess()">Request access</button><a class=alt href="/portal">Open VM homepage</a><button class=alt onclick="logoutUser()">Log out</button></div><p id=msg style="opacity:.8;margin-top:12px"></p></div><script>async function requestAccess(){{const r=await fetch('/portal/api/request-access/{name}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{note:document.getElementById('note').value||''}})}});const j=await r.json().catch(()=>({{}}));document.getElementById('msg').textContent=j.ok?'Access request sent.':'Failed: '+(j.error||r.status)}} async function logoutUser(){{await fetch('/portal/api/auth/logout',{{method:'POST',credentials:'same-origin'}}).catch(()=>null);location.href='/portal/login';}}</script></body></html>'''
     return Response(page, mimetype='text/html')
 
 def _enforce_vm_user_access(name: str):
@@ -1802,17 +1927,12 @@ def api_get_settings():
 def api_set_settings():
     title = request.values.get('title','').strip()
     favicon = request.values.get('favicon','').strip()
-    new_pw = request.values.get('new_dashboard_admin_password', None)
     cfg = _load_dashboard_settings()
     if title:
         cfg['title'] = title
     # Allow setting the v2 dashboard admin password from the old dashboard settings UI
-    try:
-        if new_pw is not None:
-            # store raw (it is only editable from the old dashboard as requested)
-            cfg['new_dashboard_admin_password'] = new_pw.strip()
-    except Exception:
-        pass
+    # Do not write the legacy dashboard password. New credentials are managed
+    # exclusively by BLOBEDASH_USER/BLOBEDASH_PASS in /opt/blobe-vm/.env.
     # If favicon is empty string, clear both saved file and url
     if favicon == '':
         cfg['favicon'] = ''
@@ -1943,19 +2063,25 @@ def portal_login_api():
     data = request.get_json(silent=True) or {}
     username = str(data.get('username') or '').strip()
     password = str(data.get('password') or '')
+    if not _same_origin_request():
+        return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
     user = _get_user_by_username(username)
     if not user or user.get('disabled') or not _verify_user_password(password, user.get('password_hash') or ''):
         return jsonify({'ok': False, 'error': 'invalid'}), 401
-    token = _create_portal_token(user['username'], bool(user.get('isAdmin')))
-    resp = jsonify({'ok': True, 'token': token, 'user': {k:v for k,v in user.items() if k != 'password_hash'}})
-    resp.set_cookie('Portal-Auth', token, httponly=True, samesite='Lax', secure=True, domain=_portal_cookie_domain(), max_age=30*24*3600)
+    try:
+        token = _create_portal_token(user['username'], bool(user.get('isAdmin')))
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 503
+    resp = jsonify({'ok': True, 'user': {k:v for k,v in user.items() if k != 'password_hash'}})
+    resp.set_cookie('Portal-Auth', token, httponly=True, samesite='Strict', secure=_request_is_https(), max_age=30*24*3600, path='/')
     return resp
 
 @app.post('/portal/api/auth/logout')
 def portal_logout_api():
+    if not _same_origin_request():
+        return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
     resp = jsonify({'ok': True})
-    resp.delete_cookie('Portal-Auth')
-    resp.delete_cookie('Portal-Auth', domain=_portal_cookie_domain())
+    resp.delete_cookie('Portal-Auth', path='/')
     return resp
 
 @app.get('/portal/api/auth/status')
@@ -1968,8 +2094,13 @@ def portal_auth_status_api():
 def portal_vms_api():
     user = request.portal_user
     assigned = _normalize_vm_names(user.get('assignedVms') or [])
+    all_vms = {item.get('name'): item for item in manager_json_list() if item.get('name')}
+    visible = []
+    for name in all_vms:
+        if _vm_access_mode(name) == 'public' or name in assigned:
+            visible.append(name)
     vms = []
-    for name in assigned:
+    for name in visible:
         try:
             status = _vm_status_payload(name)
         except Exception:
@@ -2021,6 +2152,8 @@ def portal_stop_vm(name):
 @portal_auth_required
 def portal_request_access(name):
     user = request.portal_user
+    if name not in _known_vm_names():
+        return jsonify({'ok': False, 'error': 'VM not found'}), 404
     if _user_can_access_vm(user, name):
         return jsonify({'ok': False, 'error': 'You already have access'}), 400
     note = ''
@@ -2029,8 +2162,12 @@ def portal_request_access(name):
         note = str(data.get('note') or '').strip()[:1000]
     except Exception:
         note = ''
+    _init_users_db()
     conn = _users_conn()
     try:
+        existing = conn.execute('SELECT id FROM access_requests WHERE username = ? AND vm_name = ? AND status = ?', (user['username'], name, 'pending')).fetchone()
+        if existing:
+            return jsonify({'ok': True, 'alreadyPending': True})
         conn.execute('INSERT INTO access_requests (username, vm_name, note, status) VALUES (?, ?, ?, ?)', (user['username'], name, note, 'pending'))
         conn.commit()
     finally:
@@ -2049,8 +2186,8 @@ def portal_home():
 @app.get('/portal/login')
 def portal_login_page():
     if _current_portal_user():
-        return redirect(request.args.get('next') or '/portal')
-    next_url = request.args.get('next') or '/portal'
+        return redirect(_safe_portal_next(request.args.get('next')))
+    next_url = _safe_portal_next(request.args.get('next'))
     next_js = json.dumps(next_url)
     page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VM Login</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:420px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px}}input,button{{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#020617;color:#fff;margin-top:10px}}button{{background:#2563eb;cursor:pointer}}.muted{{opacity:.75}}</style></head><body><div class=card><h1>VM Login</h1><div class=muted>Sign in to access restricted BlobeVM instances.</div><form onsubmit="return doLogin(event)"><input id=u placeholder="Username" autocomplete="username" /><input id=p type=password placeholder="Password" autocomplete="current-password" /><button>Sign in</button><div id=err style="color:#fca5a5;margin-top:10px"></div></form></div><script>async function doLogin(e){{e.preventDefault();const r=await fetch('/portal/api/auth/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:document.getElementById('u').value,password:document.getElementById('p').value}})}});const j=await r.json().catch(()=>({{}}));if(j.ok){{location.href={next_js};return false}}document.getElementById('err').textContent=j.error||'Login failed';return false}}</script></body></html>'''
     return Response(page, mimetype='text/html')
@@ -2058,6 +2195,7 @@ def portal_login_page():
 @app.get('/dashboard/api/users')
 @v2_auth_required
 def dashboard_users_list():
+    _init_users_db()
     conn = _users_conn()
     try:
         reqs = [dict(r) for r in conn.execute('SELECT id, username, vm_name, note, status, created_at FROM access_requests ORDER BY created_at DESC LIMIT 200').fetchall()]
@@ -2098,6 +2236,7 @@ def dashboard_access_request_action(req_id):
     action = str(data.get('action') or '').strip().lower()
     if action not in ('approve', 'deny', 'dismiss'):
         return jsonify({'ok': False, 'error': 'Invalid action'}), 400
+    _init_users_db()
     conn = _users_conn()
     try:
         row = conn.execute('SELECT id, username, vm_name, note, status FROM access_requests WHERE id = ?', (req_id,)).fetchone()
@@ -2127,33 +2266,54 @@ def dashboard_v2_login_public():
         data = request.get_json(force=True)
     except Exception:
         return jsonify({'ok': False}), 400
-    pw = data.get('password','') if isinstance(data, dict) else ''
-    cfg_pw = _get_v2_password()
-    if not cfg_pw:
-        return jsonify({'ok': True, 'token': '', 'expiry': None, 'authRequired': False})
-    if pw != cfg_pw:
+    if not _same_origin_request():
+        return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
+    if _allow_insecure_dashboard():
+        return jsonify({'ok': True, 'authRequired': False})
+    user, expected_password = _admin_credentials()
+    if not user or not expected_password or not _dashboard_secret():
+        return jsonify({'ok': False, 'error': 'Dashboard authentication is not configured'}), 503
+    username = str(data.get('username', '')) if isinstance(data, dict) else ''
+    pw = str(data.get('password', '')) if isinstance(data, dict) else ''
+    remote = request.remote_addr or 'unknown'
+    now = time.time()
+    with _LOGIN_LOCK:
+        attempt = _LOGIN_ATTEMPTS.get(remote, {'count': 0, 'until': 0})
+        if attempt['until'] > now:
+            return jsonify({'ok': False, 'error': 'Try again shortly'}), 429
+    if not hmac.compare_digest(username, user) or not hmac.compare_digest(pw, expected_password):
+        with _LOGIN_LOCK:
+            count = _LOGIN_ATTEMPTS.get(remote, {}).get('count', 0) + 1
+            _LOGIN_ATTEMPTS[remote] = {'count': count, 'until': now + min(30, 2 ** min(count, 5))}
         return jsonify({'ok': False, 'error': 'invalid'}), 401
+    with _LOGIN_LOCK:
+        _LOGIN_ATTEMPTS.pop(remote, None)
     exp = int(time.time() + 24*3600)
     payload = f"{exp}:{os.urandom(8).hex()}"
     token = _sign_v2_token(payload)
-    resp = jsonify({'ok': True, 'token': token, 'expiry': exp, 'authRequired': True})
-    resp.set_cookie('Dashboard-Auth', token, httponly=True, samesite='Lax')
+    resp = jsonify({'ok': True, 'expiry': exp, 'authRequired': True})
+    resp.set_cookie('Dashboard-Auth', token, httponly=True, samesite='Strict', secure=_request_is_https(), max_age=24*3600, path='/')
     return resp
 
 
 @app.get('/Dashboard/api/auth/status')
 def dashboard_v2_status_public():
-    cfg_pw = _get_v2_password()
-    if not cfg_pw:
+    if _allow_insecure_dashboard():
         return jsonify({'ok': True, 'authRequired': False})
-    auth = request.headers.get('Authorization','')
-    token = None
-    if auth.lower().startswith('bearer '):
-        token = auth.split(None,1)[1].strip()
-    if not token:
-        token = request.cookies.get('Dashboard-Auth')
+    user, password = _admin_credentials()
+    if not user or not password or not _dashboard_secret():
+        return jsonify({'ok': False, 'authRequired': True, 'configured': False}), 503
+    token = request.cookies.get('Dashboard-Auth')
     ok = bool(token and _verify_v2_token(token))
-    return jsonify({'ok': ok, 'authRequired': True})
+    return jsonify({'ok': ok, 'authRequired': True, 'configured': True})
+
+@app.post('/Dashboard/api/auth/logout')
+def dashboard_v2_logout_public():
+    if not _same_origin_request():
+        return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
+    resp = jsonify({'ok': True})
+    resp.delete_cookie('Dashboard-Auth', path='/')
+    return resp
 
 
 # --- Dashboard v2 static page routes (top-level) ---
@@ -3307,17 +3467,17 @@ def api_rebuild_vms():
     names = request.json.get('names', [])
     if not names:
         return jsonify({'error': 'No VM names provided'}), 400
-    # Mark VMs as rebuilding and run in the background so UI can show status
     for n in names:
         _set_flag(n, 'rebuilding', True)
     def worker(targets):
         try:
-            subprocess.run([MANAGER, 'rebuild-vms', *targets], capture_output=True, text=True)
+            result = subprocess.run([MANAGER, 'rebuild-vms', *targets], capture_output=True, text=True)
+            return result.returncode == 0, (result.stdout or '') + (result.stderr or '')
         finally:
             for n in targets:
                 _set_flag(n, 'rebuilding', False)
-    threading.Thread(target=worker, args=(names,), daemon=True).start()
-    return jsonify({'ok': True, 'started': True})
+    job_id = _start_job('rebuild-vms', names, lambda: worker(names))
+    return jsonify({'ok': True, 'jobId': job_id}), 202
 
 @app.post('/dashboard/api/update-and-rebuild')
 @auth_required
@@ -3336,20 +3496,26 @@ def api_update_and_rebuild():
     def worker(tgts):
         try:
             args = [MANAGER, 'update-and-rebuild'] + names
-            subprocess.run(args, capture_output=True, text=True)
+            result = subprocess.run(args, capture_output=True, text=True)
+            return result.returncode == 0, (result.stdout or '') + (result.stderr or '')
         finally:
             for n in tgts:
                 _set_flag(n, 'rebuilding', False)
-    threading.Thread(target=worker, args=(targets,), daemon=True).start()
-    return jsonify({'ok': True, 'started': True})
+    job_id = _start_job('update-and-rebuild', targets, lambda: worker(targets))
+    return jsonify({'ok': True, 'jobId': job_id}), 202
 
 @app.post('/dashboard/api/delete-all-instances')
 @auth_required
 def api_delete_all_instances():
+    data = request.get_json(silent=True) or request.form or {}
+    if data.get('confirm') != 'DELETE':
+        return jsonify({'ok': False, 'error': 'Type DELETE to confirm deleting every VM'}), 400
     try:
-        result = subprocess.run([MANAGER, 'delete-all-instances'], capture_output=True, text=True)
-        ok = (result.returncode == 0)
-        return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
+        def worker():
+            result = subprocess.run([MANAGER, 'delete-all-instances', '--yes'], capture_output=True, text=True)
+            return result.returncode == 0, (result.stdout or '') + (result.stderr or '')
+        job_id = _start_job('delete-all-instances', [], worker)
+        return jsonify({'ok': True, 'jobId': job_id}), 202
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -3359,6 +3525,9 @@ def api_delete_all_instances():
 def api_reset_all_instances():
     """Reset all known instances by deleting and recreating them in background."""
     try:
+        data = request.get_json(silent=True) or request.form or {}
+        if data.get('confirm') != 'DELETE':
+            return jsonify({'ok': False, 'error': 'Type DELETE to confirm resetting every VM'}), 400
         # Determine instance names
         try:
             names = [i['name'] for i in manager_json_list()]
@@ -3371,42 +3540,61 @@ def api_reset_all_instances():
                 names = []
 
         def worker(all_names):
+            output = []
+            ok = True
             for n in all_names:
-                try:
-                    subprocess.run([MANAGER, 'delete', n], capture_output=True, text=True)
-                except Exception:
-                    pass
-                try:
-                    subprocess.run([MANAGER, 'create', n], capture_output=True, text=True)
-                except Exception:
-                    pass
-                try:
-                    subprocess.run([MANAGER, 'start', n], capture_output=True, text=True)
-                except Exception:
-                    pass
+                for action in ('delete', 'create', 'start'):
+                    result = subprocess.run([MANAGER, action, n], capture_output=True, text=True)
+                    output.append((result.stdout or '') + (result.stderr or ''))
+                    ok = ok and result.returncode == 0
+            return ok, '\n'.join(output)
 
-        threading.Thread(target=worker, args=(names,), daemon=True).start()
-        return jsonify({'ok': True, 'started': True, 'count': len(names)})
+        job_id = _start_job('reset-all-instances', names, lambda: worker(names))
+        return jsonify({'ok': True, 'jobId': job_id, 'count': len(names)}), 202
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 @app.post('/dashboard/api/prune-docker')
 @auth_required
 def api_prune_docker():
-    """Prune unused Docker data on the host. Runs in background."""
+    """Prune only Docker resources explicitly owned by BlobeVM."""
     def worker():
-        try:
-            _docker('system', 'prune', '-af')
-            _docker('builder', 'prune', '-af')
-            _docker('image', 'prune', '-af')
-            _docker('volume', 'prune', '-f')
-        except Exception:
-            pass
+        results = [
+            _docker('container', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),
+            _docker('volume', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),
+            _docker('network', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),
+        ]
+        output = '\n'.join((r.stdout or '') + (r.stderr or '') for r in results)
+        return all(r.returncode == 0 for r in results), output
     try:
-        threading.Thread(target=worker, daemon=True).start()
-        return jsonify({'ok': True, 'started': True})
+        job_id = _start_job('prune-blobevm-resources', [], worker)
+        return jsonify({'ok': True, 'jobId': job_id}), 202
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.get('/dashboard/api/jobs')
+@admin_auth_required
+def dashboard_jobs_list():
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        rows = conn.execute('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100').fetchall()
+        return jsonify({'ok': True, 'jobs': [_job_row_to_dict(row) for row in rows]})
+    finally:
+        conn.close()
+
+@app.get('/dashboard/api/jobs/<job_id>')
+@admin_auth_required
+def dashboard_job_get(job_id):
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'Job not found'}), 404
+        return jsonify({'ok': True, 'job': _job_row_to_dict(row)})
+    finally:
+        conn.close()
 
 @app.post('/dashboard/api/update-vm/<name>')
 @auth_required
@@ -3416,11 +3604,12 @@ def api_update_vm(name):
         _set_flag(name, 'updating', True)
         def worker(vm_name):
             try:
-                _run_manager('update-vm', vm_name)
+                ok, out, err, _ = _run_manager('update-vm', vm_name)
+                return ok, out or err
             finally:
                 _set_flag(vm_name, 'updating', False)
-        threading.Thread(target=worker, args=(name,), daemon=True).start()
-        return jsonify({'ok': True, 'started': True})
+        job_id = _start_job('update-vm', [name], lambda: worker(name))
+        return jsonify({'ok': True, 'jobId': job_id}), 202
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -3731,69 +3920,18 @@ def api_optimizer_logs():
 @app.post('/dashboard/api/optimizer/clean-system')
 @auth_required
 def api_optimizer_clean_system():
-    """Run system cleaner: drop caches and prune docker but skip domain networks."""
+    """Clean only explicitly labelled BlobeVM Docker resources."""
     def worker():
-        try:
-            # Drop caches
-            try:
-                subprocess.run(['sync'], check=False)
-                subprocess.run(['bash','-c','echo 3 > /proc/sys/vm/drop_caches'], check=False)
-            except Exception:
-                pass
-            # Basic prune (images/containers/builders/volumes)
-            try:
-                subprocess.run(['docker','system','prune','-af'], check=False)
-                subprocess.run(['docker','builder','prune','-af'], check=False)
-                subprocess.run(['docker','image','prune','-af'], check=False)
-                subprocess.run(['docker','volume','prune','-f'], check=False)
-            except Exception:
-                pass
-            # Network prune but skip Blobe domain networks
-            protected = set()
-            env = _read_env()
-            try:
-                if env.get('TRAEFIK_NETWORK'):
-                    protected.add(env.get('TRAEFIK_NETWORK'))
-            except Exception:
-                pass
-            # Always protect common names
-            for n in ('proxy','traefik','blobe','blobedash','blobedash-proxy'):
-                protected.add(n)
-            # Inspect networks and protect any with containers like traefik/blobedash
-            try:
-                nets_out = subprocess.check_output(['docker','network','ls','--format','{{.Name}}'], text=True).splitlines()
-                for net in nets_out:
-                    if not net: continue
-                    nl = net.strip()
-                    if any(x in nl.lower() for x in ('proxy','traefik','blobe','blobedash')):
-                        protected.add(nl)
-                    else:
-                        # inspect containers attached
-                        try:
-                            js = subprocess.check_output(['docker','network','inspect',nl,'--format','{{json .Containers}}'], text=True)
-                            if 'traefik' in js or 'blobedash' in js or 'blobedash-proxy' in js:
-                                protected.add(nl)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            # Remove networks that are not protected (best-effort)
-            try:
-                nets_out = subprocess.check_output(['docker','network','ls','--format','{{.Name}}'], text=True).splitlines()
-                for net in nets_out:
-                    if not net: continue
-                    if net in protected: continue
-                    try:
-                        subprocess.run(['docker','network','rm', net], check=False)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        except Exception:
-            pass
+        results = [
+            _docker('container', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),
+            _docker('volume', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),
+            _docker('network', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),
+        ]
+        output = '\n'.join((r.stdout or '') + (r.stderr or '') for r in results)
+        return all(r.returncode == 0 for r in results), output
     try:
-        threading.Thread(target=worker, daemon=True).start()
-        return jsonify({'ok': True, 'started': True})
+        job_id = _start_job('optimizer-clean-blobevm-resources', [], worker)
+        return jsonify({'ok': True, 'jobId': job_id}), 202
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

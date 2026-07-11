@@ -185,6 +185,9 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -v "$STATE_DIR/dashboard:/app:ro" \
   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
   -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
+  -e DASH_V2_SECRET="${DASH_V2_SECRET:-}" \
+  -e BLOBEVM_USER_SECRET="${BLOBEVM_USER_SECRET:-}" \
+  -e BLOBEVM_ALLOW_INSECURE_DASHBOARD="${BLOBEVM_ALLOW_INSECURE_DASHBOARD:-0}" \
   -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
   "$IMAGE_NAME" \
   >/dev/null
