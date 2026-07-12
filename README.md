@@ -1,5 +1,7 @@
 # BlobeVM (Modified DesktopOnCodespaces)
 
+Deployment guides: [Linux production and Windows/WSL2](docs/DEPLOYMENT.md).
+
 ## Codespaces Installation
 For a full description of the new modern dashboard (Dashboard v2), see `docs/DASHBOARD_V2.md`.
 For full CLI reference (including `apps`, `update-vm`, and `--yes` automation flags), see `docs/CLI.md`.

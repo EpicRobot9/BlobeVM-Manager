@@ -28,6 +28,10 @@ export default function App(){
   const location = useLocation()
 
   useEffect(()=>{
+    if(import.meta.env.DEV && new URLSearchParams(window.location.search).get('preview') === '1'){
+      setAuth({loading:false, allowed:true, required:false})
+      return undefined
+    }
     let live = true
     authStatus().then(result => {
       if(!live) return
