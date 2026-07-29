@@ -22,6 +22,24 @@ app = Flask(__name__)
 _LOGIN_ATTEMPTS = {}
 _LOGIN_LOCK = threading.Lock()
 
+# Dashboard escalation is an expensive, state-changing AI recovery request.
+# Keep the gate in-process so repeated clicks cannot launch concurrent agents.
+_HERMES_ESCALATION_COOLDOWN_SECONDS = 300
+_HERMES_ESCALATIONS = {}
+_HERMES_ESCALATION_LOCK = threading.Lock()
+
+def _claim_hermes_escalation(name: str, now=None):
+    now = time.time() if now is None else float(now)
+    with _HERMES_ESCALATION_LOCK:
+        previous = _HERMES_ESCALATIONS.get(name)
+        if previous is not None:
+            elapsed = max(0.0, now - previous)
+            remaining = int(max(0, _HERMES_ESCALATION_COOLDOWN_SECONDS - elapsed))
+            if remaining > 0:
+                return {'allowed': False, 'retry_after': remaining}
+        _HERMES_ESCALATIONS[name] = now
+    return {'allowed': True, 'retry_after': 0}
+
 def _allow_insecure_dashboard() -> bool:
     return os.environ.get('BLOBEVM_ALLOW_INSECURE_DASHBOARD') == '1'
 
@@ -1835,7 +1853,7 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode
     return {'ok': False, 'recovered': False, 'attempts': attempts, 'status': final, 'message': 'VM recovery failed', 'source': source, 'mode': mode}
 
 
-def _escalate_vm_to_openclaw(name: str, reason: str, extra=None):
+def _escalate_vm_to_hermes(name: str, reason: str, extra=None):
     extra = extra or {}
     payload = {
         'vm': name,
@@ -1852,15 +1870,21 @@ def _escalate_vm_to_openclaw(name: str, reason: str, extra=None):
     with open(esc_path, 'w') as f:
         json.dump(payload, f, indent=2)
     msg = (
-        f"BlobeVM escalation from dashboard on host {payload['host']}. "
-        f"VM '{name}' needs recovery help. Reason: {reason}. "
-        f"Status: {json.dumps(payload['status'])}. "
-        f"Recent logs:\n{payload['logs'][:3000]}"
+        "BlobeVM recovery request from the dashboard. Act as the recovery operator: "
+        "inspect the VM and its recent logs, determine why it is down, and recover it "
+        "if safe and possible. Verify the result instead of assuming success. "
+        f"Host: {payload['host']}. VM: '{name}'. Reason: {reason}. "
+        f"Status: {json.dumps(payload['status'])}. Recent logs:\n{payload['logs'][:3000]}"
     )
     delivered = False
     cli_error = ''
     try:
-        proc = subprocess.run(['openclaw', 'agent', '--to', 'agent:main:main', '--message', msg], capture_output=True, text=True, timeout=45)
+        proc = subprocess.run(
+            ['hermes', 'chat', '-q', msg, '--toolsets', 'terminal', '--max-turns', '20', '--source', 'blobevm-dashboard', '--quiet'],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
         delivered = proc.returncode == 0
         if not delivered:
             cli_error = (proc.stderr or proc.stdout or '').strip()[:1200]
@@ -3062,13 +3086,22 @@ def api_vm_recover(name):
 @app.post('/dashboard/api/vm/<name>/escalate')
 @auth_required
 def api_vm_escalate(name):
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', name or ''):
+        return jsonify({'ok': False, 'error': 'Invalid VM name'}), 400
+    claim = _claim_hermes_escalation(name)
+    if not claim['allowed']:
+        return jsonify({
+            'ok': False,
+            'error': 'Hermes is already handling this VM',
+            'retryAfter': claim['retry_after'],
+        }), 429
     try:
         data = request.get_json(silent=True) or {}
         reason = data.get('reason') if isinstance(data, dict) else None
         if not reason:
-            reason = 'Dashboard escalation requested by user'
-        rec = _recover_vm(name, source='openclaw-escalation', aggressive=True)
-        esc = _escalate_vm_to_openclaw(name, reason, {'recovery': rec, 'request': data})
+            reason = 'Dashboard recovery help requested by user'
+        rec = _recover_vm(name, source='hermes-escalation', aggressive=True)
+        esc = _escalate_vm_to_hermes(name, reason, {'recovery': rec, 'request': data})
         return jsonify({'ok': True, 'recovery': rec, 'escalation': esc})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500

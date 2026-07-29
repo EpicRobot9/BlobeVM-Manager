@@ -30,7 +30,7 @@
     const vmurl = props.vmurl;
     const iframeReady = !!props.iframeReady;
     const vm = window.useVMStatus(vmname, { interval: 1600 });
-    const [phase, setPhase] = useState('idle'); // idle | starting | recovering | error | sent
+    const [phase, setPhase] = useState('idle'); // idle | starting | recovering | sending | error | sent
     const [errorMsg, setErrorMsg] = useState('');
     const [details, setDetails] = useState('');
     const [lastCrashAt, setLastCrashAt] = useState(null);
@@ -143,12 +143,13 @@
       }
     }
 
-    async function sendToOpenClaw(){
-      setPhase('sent');
+    async function sendToHermes(){
+      if(phase === 'sending' || phase === 'sent') return;
+      setPhase('sending');
       setDetails('');
       try{
         const res = await window.api.escalateVM(vmname, {
-          reason: errorMsg || 'User requested OpenClaw recovery help from VM fallback screen.',
+          reason: errorMsg || 'User requested Hermes recovery help from VM fallback screen.',
           vmStatus: vm,
           lastCrashAt
         });
@@ -157,14 +158,15 @@
         }
         const esc = res.body && res.body.escalation ? res.body.escalation : {};
         const rec = res.body && res.body.recovery ? res.body.recovery : {};
+        setPhase('sent');
         setDetails([
           esc.path ? `Saved escalation: ${esc.path}` : null,
-          esc.queued ? 'Sent to OpenClaw successfully.' : (esc.cliError ? `OpenClaw handoff issue: ${esc.cliError}` : 'Saved locally for OpenClaw review.'),
+          esc.queued ? 'Sent to Hermes successfully.' : (esc.cliError ? `Hermes handoff issue: ${esc.cliError}` : 'Saved locally for Hermes review.'),
           rec && rec.message ? `Recovery: ${rec.message}` : null
         ].filter(Boolean).join('\n'));
       }catch(e){
         setPhase('error');
-        setErrorMsg(`Failed to contact OpenClaw: ${String(e)}`);
+        setErrorMsg(`Failed to contact Hermes: ${String(e)}`);
       }
     }
 
@@ -175,7 +177,7 @@
       : (recovery.startsWith('protected-')
         ? 'This VM is being preserved because it looks active or important. Recovery is intentionally more cautious.'
         : (vm && vm.crashed
-          ? 'I tried to bring it back automatically. If that failed, you can escalate it to OpenClaw below.'
+          ? 'I tried to bring it back automatically. If that failed, you can send the diagnostics to Hermes below.'
           : 'You can power it on here and I’ll switch you over once it is actually alive.'));
 
     return (
@@ -221,13 +223,13 @@
                     className:'btn btn-primary',
                     onClick: ()=>attemptRecover(errorMsg || 'Retry requested after error', false)
                   }, recovery === 'restart-loop' ? 'Retry aggressive recovery' : (recovery.startsWith('protected-') ? 'Retry cautious recovery' : 'Try again')),
-                  React.createElement('button', { className:'btn btn-danger', onClick: sendToOpenClaw }, recovery === 'restart-loop' ? 'Escalate restart loop' : 'Send error to OpenClaw'),
+                  React.createElement('button', { className:'btn btn-danger', disabled: phase === 'sending' || phase === 'sent', onClick: sendToHermes }, phase === 'sending' ? 'Sending to Hermes…' : (recovery === 'restart-loop' ? 'Send restart loop to Hermes' : 'Send error to Hermes')),
                   React.createElement('button', { className:'btn btn-secondary', onClick: ()=>window.location.reload() }, 'Reload page')
                 )
               ),
               phase === 'sent' && React.createElement('div', { className:'sent-box' },
-                React.createElement('strong', null, 'OpenClaw escalation requested.'),
-                React.createElement('div', { style:{marginTop:8} }, 'I sent the diagnostics and also tried to recover the VM again.')
+                React.createElement('strong', null, 'Hermes recovery request sent.'),
+                React.createElement('div', { style:{marginTop:8} }, 'Hermes received the diagnostics and will investigate whether the VM can be recovered.')
               ),
               details && React.createElement('pre', { className:'details-box' }, details)
             )
