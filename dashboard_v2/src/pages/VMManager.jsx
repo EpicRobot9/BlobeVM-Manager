@@ -5,7 +5,7 @@ import Modal from '../components/Modal'
 import VmExec from '../components/VmExec'
 import { useToasts } from '../components/ToastProvider'
 import { instanceNamesKey, pollDelayMs } from '../lib/polling'
-import { createLoadInFlightRunner } from '../lib/vmManagerRaces'
+import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
 
 function toneFor(status){
   const s = (status || '').toLowerCase()
@@ -125,11 +125,12 @@ export default function VMManager(){
   const loadSequenceRef = useRef(0)
   const loadInFlightRef = useRef(null)
   const logRequestSequenceRef = useRef(0)
-  const logInFlightRef = useRef(new Map())
+  const logSelectionTrackerRef = useRef(null)
   const loadRunnerRef = useRef(null)
   const mountedRef = useRef(true)
   const manageRequestSequenceRef = useRef(0)
   if(!loadRunnerRef.current) loadRunnerRef.current = createLoadInFlightRunner()
+  if(!logSelectionTrackerRef.current) logSelectionTrackerRef.current = createLogSelectionTracker()
 
   async function fetchVmSettings(name, requestSequence = loadSequenceRef.current){
     if(vmSettingsCacheRef.current.has(name)) return vmSettingsCacheRef.current.get(name)
@@ -182,6 +183,7 @@ export default function VMManager(){
       if(namesKey !== instanceNamesKeyRef.current){
         instanceNamesKeyRef.current = namesKey
         const currentNames = new Set(listedInstances.map(it => it.name))
+        const removedNames = [...vmSettingsNamesRef.current].filter(name => !currentNames.has(name))
         vmSettingsGenerationRef.current += 1
         vmSettingsNamesRef.current = currentNames
         for(const name of vmSettingsCacheRef.current.keys()){
@@ -190,6 +192,7 @@ export default function VMManager(){
         for(const name of vmSettingsInFlightRef.current.keys()){
           if(!currentNames.has(name)) vmSettingsInFlightRef.current.delete(name)
         }
+        clearRemovedVmState(prevStatsRef.current, lastAnnounceRef.current, removedNames)
       }
       const missingSettings = listedInstances.filter(it => !vmSettingsCacheRef.current.has(it.name))
       await Promise.all(missingSettings.map(it => fetchVmSettings(it.name, requestSequence)))
@@ -398,35 +401,38 @@ export default function VMManager(){
   }
 
   async function openDetails(name){
+    logSelectionTrackerRef.current.select(name)
+    logRequestSequenceRef.current += 1
     setSelected(name)
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name)
   }
 
   async function fetchLogs(name){
-    const existing = logInFlightRef.current.get(name)
+    if(!logSelectionTrackerRef.current.isSelected(name)) return Promise.resolve()
+    const selectionGeneration = logSelectionTrackerRef.current.selectionGeneration
+    const existing = logSelectionTrackerRef.current.get(name)
     if(existing) return existing
     const requestSequence = ++logRequestSequenceRef.current
     setLogLoading(true)
-    const request = (async()=>{
+    const request = logSelectionTrackerRef.current.run(name, async()=>{
       try{
         const r = await apiFetch(`/vm/logs/${encodeURIComponent(name)}`)
         const j = await r.json().catch(()=>({ok:false, logs:''}))
-        if(requestSequence !== logRequestSequenceRef.current) return
+        if(requestSequence !== logRequestSequenceRef.current || !logSelectionTrackerRef.current.isCurrent(name, selectionGeneration)) return
         setLogs(j.logs || j.logs === '' ? (j.logs || '') : (j.error || ''))
       }catch(e){
-        if(requestSequence === logRequestSequenceRef.current) setLogs('Error loading logs: ' + String(e))
+        if(requestSequence === logRequestSequenceRef.current && logSelectionTrackerRef.current.isCurrent(name, selectionGeneration)) setLogs('Error loading logs: ' + String(e))
       }finally{
-        if(requestSequence === logRequestSequenceRef.current) setLogLoading(false)
-        if(logInFlightRef.current.get(name) === request) logInFlightRef.current.delete(name)
+        if(requestSequence === logRequestSequenceRef.current && logSelectionTrackerRef.current.isCurrent(name, selectionGeneration)) setLogLoading(false)
       }
-    })()
-    logInFlightRef.current.set(name, request)
+    })
     return request
   }
 
   async function openManage(name){
     const requestSequence = ++manageRequestSequenceRef.current
+    const requestGeneration = vmSettingsGenerationRef.current
     setManageVm(name)
     setManageBusy(true)
     setFaviconFile(null)
@@ -435,14 +441,16 @@ export default function VMManager(){
       const j = await r.json().catch(()=>({}))
       if(!r.ok || j.ok === false) throw new Error(j.error || 'Failed to load VM settings')
       if(!mountedRef.current || requestSequence !== manageRequestSequenceRef.current) return
-      if(vmSettingsNamesRef.current.has(name)) vmSettingsCacheRef.current.set(name, j)
-      setManageDraft({
-        title: j.title || '',
-        hostOverride: j.hostOverride || '',
-        faviconUrl: j.faviconUrl || '',
-        accessMode: j.accessMode || 'public',
-        assignedUsers: j.assignedUsers || []
-      })
+      if(canCacheVmSettingsResponse({ requestSequence, currentSequence: manageRequestSequenceRef.current, requestGeneration, currentGeneration: vmSettingsGenerationRef.current, namePresent: vmSettingsNamesRef.current.has(name) })){
+        vmSettingsCacheRef.current.set(name, j)
+        setManageDraft({
+          title: j.title || '',
+          hostOverride: j.hostOverride || '',
+          faviconUrl: j.faviconUrl || '',
+          accessMode: j.accessMode || 'public',
+          assignedUsers: j.assignedUsers || []
+        })
+      }
     }catch(e){
       if(mountedRef.current && requestSequence === manageRequestSequenceRef.current) addToast({ title:'Load failed', message:String(e), type:'error', timeout:7000 })
     }
@@ -529,6 +537,7 @@ export default function VMManager(){
     return ()=>{
       stopped = true
       logRequestSequenceRef.current += 1
+      logSelectionTrackerRef.current.select(null)
       clear()
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }

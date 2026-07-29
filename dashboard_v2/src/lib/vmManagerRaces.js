@@ -54,3 +54,46 @@ export function createInFlightDeduper(){
     }
   }
 }
+
+export function canCacheVmSettingsResponse({ requestSequence, currentSequence, requestGeneration, currentGeneration, namePresent }){
+  return requestSequence === currentSequence && requestGeneration === currentGeneration && namePresent
+}
+
+export function clearRemovedVmState(prevStats, lastAnnounce, removedNames){
+  for(const name of removedNames){
+    delete prevStats[name]
+    delete lastAnnounce[name]
+  }
+}
+
+export function createLogSelectionTracker(){
+  let selectedName = null
+  let selectionGeneration = 0
+  const entries = new Map()
+  return {
+    select(name){
+      if(selectedName !== name){
+        if(selectedName !== null) entries.delete(selectedName)
+        selectedName = name
+        selectionGeneration += 1
+      }
+      return selectionGeneration
+    },
+    get selectionGeneration(){ return selectionGeneration },
+    run(name, task){
+      const existing = entries.get(name)
+      if(existing) return existing
+      const request = Promise.resolve().then(task)
+      entries.set(name, request)
+      request.finally(() => {
+        if(entries.get(name) === request) entries.delete(name)
+      }).catch(() => {})
+      return request
+    },
+    get(name){ return entries.get(name) },
+    isSelected(name){ return selectedName === name },
+    isCurrent(name, requestGeneration){
+      return selectedName === name && requestGeneration === selectionGeneration
+    }
+  }
+}
