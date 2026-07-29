@@ -31,6 +31,7 @@ PROFILE_META_PATH = os.path.join(STATE_DIR, '.optimizer_profiles.json')
 HISTORY_META_PATH = os.path.join(STATE_DIR, '.optimizer_history.json')
 TREND_META_PATH = os.path.join(STATE_DIR, '.optimizer_trends.json')
 NOTIFICATION_META_DIR = os.path.join(STATE_DIR, '.optimizer_notifications')
+CPU_PRIORITY_META_PATH = os.path.join(STATE_DIR, '.optimizer_cpu_priority.json')
 
 DENSITY_PROFILES = {
     'single-user': {
@@ -90,6 +91,10 @@ DEFAULT_CFG = {
     'interactiveVmCpuBudgetPercent': 20,
     'gamingVmMemoryMb': 3072,
     'interactiveVmMemoryMb': 2048,
+    'activityCpuPriorityEnabled': False,
+    'activeCpuShares': 2048,
+    'warmCpuShares': 1024,
+    'idleCpuShares': 512,
 }
 
 
@@ -533,6 +538,61 @@ def enforce_strict_memory(cfg: dict):
                 log(f'docker update failed for {name} : {e}')
     except Exception as e:
         log(f'enforceStrictMemory error {e}')
+
+
+def _cpu_share_value(value, default):
+    """Return a safe Docker CPU-share value from potentially bad config input."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return min(262144, max(2, value))
+
+
+def _desired_cpu_shares(vm_states, cfg):
+    """Map valid running VM names to their configured activity-class shares."""
+    shares = {
+        'active': _cpu_share_value(cfg.get('activeCpuShares', DEFAULT_CFG['activeCpuShares']), DEFAULT_CFG['activeCpuShares']),
+        'warm': _cpu_share_value(cfg.get('warmCpuShares', DEFAULT_CFG['warmCpuShares']), DEFAULT_CFG['warmCpuShares']),
+        'idle': _cpu_share_value(cfg.get('idleCpuShares', DEFAULT_CFG['idleCpuShares']), DEFAULT_CFG['idleCpuShares']),
+    }
+    desired = {}
+    for state in vm_states or []:
+        name = str(state.get('name') or '')
+        activity_class = state.get('activityClass')
+        if (not state.get('running') or activity_class not in shares or
+                name in {'dashboard', 'traefik'} or
+                not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name)):
+            continue
+        desired[name] = shares[activity_class]
+    return dict(sorted(desired.items()))
+
+
+def _apply_cpu_priority(cfg, vm_states):
+    """Apply changed CPU shares to running Blobe VM containers, tolerating failures."""
+    if not cfg.get('activityCpuPriorityEnabled', False):
+        return {}
+    desired = _desired_cpu_shares(vm_states, cfg)
+    try:
+        previous = _read_json_file(CPU_PRIORITY_META_PATH, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        applied = {name: previous[name] for name in desired if previous.get(name) == desired[name]}
+        for name, share in desired.items():
+            if applied.get(name) == share:
+                continue
+            try:
+                subprocess.check_call(['docker', 'update', f'--cpu-shares={share}', f'blobevm_{name}'])
+                applied[name] = share
+                log(f'cpu priority for {name} -> {share} shares')
+            except Exception as e:
+                log(f'docker cpu priority update failed for {name}: {e}')
+        if applied:
+            _write_json_file(CPU_PRIORITY_META_PATH, applied)
+        return applied
+    except Exception as e:
+        log(f'cpu priority error: {e}')
+        return {}
 
 
 def _action_allowed(name: str, action: str, cooldown: int):
@@ -1189,6 +1249,7 @@ def run_once():
         pre_stats = gather_stats()
         host_pressure = _derive_host_pressure(pre_stats, cfg)
         vm_states = _derive_vm_states(cfg, pre_stats)
+        _apply_cpu_priority(cfg, vm_states)
         vm_state_map = _vm_state_map(vm_states)
         idle_shutdown = _stop_idle_inactive_vms(cfg, vm_states)
         if idle_shutdown:
