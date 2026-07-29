@@ -4,6 +4,7 @@ import apiFetch from '../lib/fetchWrapper'
 import Modal from '../components/Modal'
 import VmExec from '../components/VmExec'
 import { useToasts } from '../components/ToastProvider'
+import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 
 function toneFor(status){
   const s = (status || '').toLowerCase()
@@ -115,8 +116,34 @@ export default function VMManager(){
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
   const didLoadOnceRef = useRef(false)
+  const instanceNamesKeyRef = useRef('')
+  const vmSettingsCacheRef = useRef(new Map())
+  const vmSettingsInFlightRef = useRef(new Map())
+  const loadSequenceRef = useRef(0)
+  const logRequestSequenceRef = useRef(0)
+
+  async function fetchVmSettings(name, requestSequence = loadSequenceRef.current){
+    if(vmSettingsCacheRef.current.has(name)) return vmSettingsCacheRef.current.get(name)
+    const existing = vmSettingsInFlightRef.current.get(name)
+    if(existing) return existing
+    const request = (async()=>{
+      try{
+        const resp = await apiFetch(`/vm-settings/${encodeURIComponent(name)}`)
+        const data = await resp.json().catch(()=>({ ok:false }))
+        if(resp.ok && data && data.ok !== false && requestSequence === loadSequenceRef.current) vmSettingsCacheRef.current.set(name, data)
+        return data
+      }catch(_e){
+        return null
+      }finally{
+        vmSettingsInFlightRef.current.delete(name)
+      }
+    })()
+    vmSettingsInFlightRef.current.set(name, request)
+    return request
+  }
 
   async function load({ silent = false } = {}){
+    const requestSequence = ++loadSequenceRef.current
     if(silent && didLoadOnceRef.current){
       setRefreshing(true)
     } else {
@@ -133,21 +160,29 @@ export default function VMManager(){
       const statJ = rStats && rStats.ok ? await rStats.json().catch(()=>({vms:{}})) : (rStats && typeof rStats.json === 'function' ? await rStats.json().catch(()=>({vms:{}})) : {vms:{}})
       const optJ = rOpt && typeof rOpt.json === 'function' ? await rOpt.json().catch(()=>({ok:false})) : {ok:false}
       const settingsJ = rSettings && typeof rSettings.json === 'function' ? await rSettings.json().catch(()=>({})) : {}
+      if(requestSequence !== loadSequenceRef.current) return
       const statsMap = (statJ && statJ.vms) ? statJ.vms : {}
       const optimizerVmMap = Object.fromEntries(((optJ && optJ.vmStates) || []).map(v => [v.name, v]))
       const profileMap = (optJ && optJ.profiles) || {}
       const titleMap = (settingsJ && settingsJ.vm_titles) || {}
 
-      const vmSettingsPairs = await Promise.all((j.instances || []).map(async (it) => {
-        try{
-          const resp = await apiFetch(`/vm-settings/${encodeURIComponent(it.name)}`)
-          const data = await resp.json().catch(()=>({ ok:false }))
-          return [it.name, data]
-        }catch(_e){
-          return [it.name, {}]
+      const listedInstances = j.instances || []
+      const namesKey = instanceNamesKey(listedInstances)
+      if(namesKey !== instanceNamesKeyRef.current){
+        instanceNamesKeyRef.current = namesKey
+        const currentNames = new Set(listedInstances.map(it => it.name))
+        for(const name of vmSettingsCacheRef.current.keys()){
+          if(!currentNames.has(name)) vmSettingsCacheRef.current.delete(name)
         }
-      }))
-      const vmSettingsMap = Object.fromEntries(vmSettingsPairs)
+      }
+      const missingSettings = listedInstances.filter(it => !vmSettingsCacheRef.current.has(it.name))
+      const settingsResults = await Promise.all(missingSettings.map(it => fetchVmSettings(it.name, requestSequence)))
+      if(requestSequence !== loadSequenceRef.current) return
+      for(let i = 0; i < missingSettings.length; i++){
+        const data = settingsResults[i]
+        if(data && data.ok !== false) vmSettingsCacheRef.current.set(missingSettings[i].name, data)
+      }
+      const vmSettingsMap = Object.fromEntries([...vmSettingsCacheRef.current.entries()])
 
       const insts = (j.instances || []).map(it => ({
         ...it,
@@ -194,29 +229,66 @@ export default function VMManager(){
         }
       }catch(e){}
 
+      if(requestSequence !== loadSequenceRef.current) return
       prevStatsRef.current = statsMap || {}
       setInstances(insts)
       if(optJ && optJ.ok) setOptimizer(optJ)
       didLoadOnceRef.current = true
     }catch(e){
-      console.error('load instances', e)
-      addToast({ title:'Load failed', message:String(e), type:'error', timeout:8000 })
+      if(requestSequence === loadSequenceRef.current){
+        console.error('load instances', e)
+        addToast({ title:'Load failed', message:String(e), type:'error', timeout:8000 })
+      }
     }
-    setInitialLoading(false)
-    setRefreshing(false)
+    if(requestSequence === loadSequenceRef.current){
+      setInitialLoading(false)
+      setRefreshing(false)
+    }
   }
 
   useEffect(()=>{
     let stopped = false
-    async function tick(first = false){
-      if(stopped) return
-      await load({ silent: !first })
-      const ivMs = parseInt(localStorage.getItem('nbv2_update_interval') || '3000', 10)
-      await new Promise(r=>setTimeout(r, Math.max(800, ivMs)))
-      if(!stopped) tick(false)
+    let timer = null
+    let loading = false
+
+    const clearTimer = () => {
+      if(timer !== null){
+        clearTimeout(timer)
+        timer = null
+      }
     }
-    tick(true)
-    return ()=>{ stopped = true }
+
+    const schedule = (delay = 0) => {
+      if(stopped || document.visibilityState !== 'visible' || timer !== null) return
+      timer = setTimeout(async () => {
+        timer = null
+        if(stopped || document.visibilityState !== 'visible') return
+        if(loading) return schedule(pollDelayMs({ visible:true, intervalMs: parseInt(localStorage.getItem('nbv2_update_interval') || '3000', 10) }))
+        loading = true
+        try{
+          await load({ silent: didLoadOnceRef.current })
+        }finally{
+          loading = false
+          if(!stopped && document.visibilityState === 'visible'){
+            const intervalMs = parseInt(localStorage.getItem('nbv2_update_interval') || '3000', 10)
+            schedule(pollDelayMs({ visible:true, intervalMs }))
+          }
+        }
+      }, delay)
+    }
+
+    const onVisibilityChange = () => {
+      clearTimer()
+      if(document.visibilityState === 'visible') schedule(0)
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    schedule(0)
+    return () => {
+      stopped = true
+      clearTimer()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
   }, [])
 
   async function action(cmd, name, opts = {}){
@@ -301,15 +373,17 @@ export default function VMManager(){
   }
 
   async function fetchLogs(name){
+    const requestSequence = ++logRequestSequenceRef.current
     setLogLoading(true)
     try{
       const r = await apiFetch(`/vm/logs/${encodeURIComponent(name)}`)
       const j = await r.json().catch(()=>({ok:false, logs:''}))
+      if(requestSequence !== logRequestSequenceRef.current) return
       setLogs(j.logs || j.logs === '' ? (j.logs || '') : (j.error || ''))
     }catch(e){
-      setLogs('Error loading logs: ' + String(e))
+      if(requestSequence === logRequestSequenceRef.current) setLogs('Error loading logs: ' + String(e))
     }
-    setLogLoading(false)
+    if(requestSequence === logRequestSequenceRef.current) setLogLoading(false)
   }
 
   async function openManage(name){
@@ -319,6 +393,8 @@ export default function VMManager(){
     try{
       const r = await apiFetch(`/vm-settings/${encodeURIComponent(name)}`)
       const j = await r.json().catch(()=>({}))
+      if(!r.ok || j.ok === false) throw new Error(j.error || 'Failed to load VM settings')
+      vmSettingsCacheRef.current.set(name, j)
       setManageDraft({
         title: j.title || '',
         hostOverride: j.hostOverride || '',
@@ -352,6 +428,7 @@ export default function VMManager(){
         if(!favRes.ok || favJ.ok === false) throw new Error(favJ.error || 'Failed uploading favicon')
       }
 
+      vmSettingsCacheRef.current.delete(manageVm)
       addToast({ title:manageVm, message:'VM settings updated', type:'success', timeout:5000 })
       setManageVm(null)
       setFaviconFile(null)
@@ -380,9 +457,29 @@ export default function VMManager(){
   }
 
   useEffect(()=>{
-    let iv
-    if(selected) iv = setInterval(()=>fetchLogs(selected), 2500)
-    return ()=>{ if(iv) clearInterval(iv) }
+    let timer = null
+    let stopped = false
+    const clear = () => {
+      if(timer !== null){ clearInterval(timer); timer = null }
+    }
+    const start = () => {
+      clear()
+      if(!stopped && selected && document.visibilityState === 'visible'){
+        timer = setInterval(()=>fetchLogs(selected), 2500)
+      }
+    }
+    const onVisibilityChange = () => {
+      if(document.visibilityState === 'visible') start()
+      else clear()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    start()
+    return ()=>{
+      stopped = true
+      logRequestSequenceRef.current += 1
+      clear()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
   }, [selected])
 
   const summary = useMemo(()=>{
