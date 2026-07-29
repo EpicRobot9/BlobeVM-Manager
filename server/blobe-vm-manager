@@ -11,6 +11,7 @@ set -euo pipefail
 #   restart <name>
 #   status <name>
 #  set-title <name> <title>     # set per-VM title and recreate container
+#   set-docker <name> on|off|auto # configure nested Docker startup and recreate container
 #   check [--no-fix] <name>   # HTTP check the VM URL; optional --no-fix to skip auto-resolve
 #   delete <name>
 #   rename <old> <new>        # move instance and switch URL to new name
@@ -36,7 +37,7 @@ set -euo pipefail
 # - In Direct mode (NO_TRAEFIK=1): publishes a unique high port per VM without any reverse proxy
 # - Prints the VM URL on create/start
 
-STATE_DIR=/opt/blobe-vm
+STATE_DIR="${STATE_DIR:-/opt/blobe-vm}"
 INST_DIR="$STATE_DIR/instances"
 ENV_FILE="$STATE_DIR/.env"
 
@@ -99,6 +100,7 @@ Commands:
   help                         # show this help
   list
   set-title <name> <title>     # set per-VM title and recreate container
+  set-docker <name> on|off|auto # configure nested Docker startup and recreate container
   list-ports                   # direct mode: show VM -> port
   create <name>
   start <name>
@@ -531,6 +533,14 @@ run_container() {
     graphics_env+=( -e DISABLE_DRI=1 -e DRINODE=/dev/null )
   fi
 
+  local start_docker_env=()
+  local start_docker
+  start_docker="$(get_meta "$name" start_docker || true)"
+  case "$start_docker" in
+    on)  start_docker_env+=( -e START_DOCKER=true ) ;;
+    off) start_docker_env+=( -e START_DOCKER=false ) ;;
+  esac
+
   docker run -d \
     --name "$cname" \
     --restart unless-stopped \
@@ -539,6 +549,7 @@ run_container() {
     -e TZ=Etc/UTC \
     -e SUBFOLDER="$subfolder" \
     -e TITLE="$TITLE_ENV" \
+    ${start_docker_env[@]:-} \
     ${graphics_env[@]:-} \
     --shm-size="2gb" \
     -v "$save_dir":/config \
@@ -597,6 +608,31 @@ cmd_set_title() {
   echo "Done. New URL: $(vm_url "$name")"
 }
 
+cmd_set_docker() {
+  local name="${1:-}" mode="${2:-}"
+  [[ -z "$name" || -z "$mode" ]] && usage
+  require_valid_vm_name "$name"
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  case "$mode" in
+    on|off) set_meta "$name" start_docker "$mode" ;;
+    auto) del_meta "$name" start_docker || true ;;
+    *)
+      echo "Invalid nested Docker mode '$mode'; choose on, off, or auto." >&2
+      exit 1
+      ;;
+  esac
+  recreate_container "$name"
+  echo "Nested Docker set to '$mode' for '$name'"
+}
+
+normalize_docker_mode() {
+  case "${1:-}" in
+    on|off) printf '%s' "$1" ;;
+    *) printf 'auto' ;;
+  esac
+}
+
 cmd_list() {
   ensure_instance_dir
   echo "Instances:"
@@ -615,7 +651,9 @@ cmd_list() {
         hp="$(get_meta "$name" host_port || true)"
         [[ -n "$hp" ]] && st="${st} (port ${hp})"
       fi
-      echo "- $name -> ${st} -> $(vm_url "$name")"
+      local docker_mode
+      docker_mode="$(normalize_docker_mode "$(get_meta "$name" start_docker || true)")"
+      echo "- $name -> ${st} -> nested-docker=${docker_mode} -> $(vm_url "$name")"
     fi
   done
 }
@@ -709,7 +747,10 @@ cmd_status() {
     local hp; hp="$(get_meta "$name" host_port || true)"
     [[ -n "$hp" ]] && st="${st} (port ${hp})"
   fi
+  local docker_mode
+  docker_mode="$(normalize_docker_mode "$(get_meta "$name" start_docker || true)")"
   echo "${name}: ${st}"
+  echo "Nested Docker: ${docker_mode}"
   echo "URL: $(vm_url "$name")"
 }
 
@@ -1466,6 +1507,7 @@ main() {
     set-path) cmd_set_path "$@" ;;
     clear-path) cmd_clear_path "$@" ;;
     set-title) cmd_set_title "$@" ;;
+    set-docker) cmd_set_docker "$@" ;;
     port)   cmd_port "$@" ;;
     set-port) cmd_set_port "$@" ;;
     url)    cmd_url "$@" ;;
