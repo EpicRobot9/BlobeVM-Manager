@@ -568,28 +568,92 @@ def _desired_cpu_shares(vm_states, cfg):
     return dict(sorted(desired.items()))
 
 
-def _apply_cpu_priority(cfg, vm_states):
-    """Apply changed CPU shares to running Blobe VM containers, tolerating failures."""
-    if not cfg.get('activityCpuPriorityEnabled', False):
-        return {}
-    desired = _desired_cpu_shares(vm_states, cfg)
+def _cpu_priority_metadata(data):
+    """Normalize current and legacy CPU-priority metadata."""
+    if not isinstance(data, dict):
+        return {'enabled': False, 'vms': {}}
+    current_format = isinstance(data.get('vms'), dict)
+    if current_format:
+        vms = data['vms']
+    else:
+        vms = {
+            name: {'share': value, 'containerId': None}
+            for name, value in data.items()
+            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', str(name))
+        }
+    return {'enabled': data.get('enabled') is True or (not current_format and bool(vms)), 'vms': vms}
+
+
+def _container_identity(name):
     try:
-        previous = _read_json_file(CPU_PRIORITY_META_PATH, {})
-        if not isinstance(previous, dict):
-            previous = {}
-        applied = {name: previous[name] for name in desired if previous.get(name) == desired[name]}
+        identity = subprocess.check_output(
+            ['docker', 'inspect', '--format={{.ID}}', f'blobevm_{name}'],
+            text=True,
+        ).strip()
+        return identity or None
+    except Exception:
+        return None
+
+
+def _apply_cpu_priority(cfg, vm_states):
+    """Apply or safely reset activity CPU shares, tolerating Docker failures."""
+    try:
+        metadata = _cpu_priority_metadata(_read_json_file(CPU_PRIORITY_META_PATH, {}))
+        if cfg.get('activityCpuPriorityEnabled') is not True:
+            remaining = {}
+            for name, entry in metadata['vms'].items():
+                valid_name = isinstance(name, str) and re.fullmatch(
+                    r'[A-Za-z0-9][A-Za-z0-9_.-]*', name
+                )
+                valid_identity = (
+                    isinstance(entry, dict)
+                    and isinstance(entry.get('containerId'), str)
+                    and bool(entry['containerId'].strip())
+                )
+                if not valid_name or not valid_identity:
+                    remaining[name] = entry
+                    continue
+                identity = _container_identity(name)
+                if identity != entry['containerId']:
+                    remaining[name] = entry
+                    log(f'cpu priority reset skipped for {name}: container identity changed or unavailable')
+                    continue
+                try:
+                    subprocess.check_call([
+                        'docker', 'update', '--cpu-shares=1024', entry['containerId']
+                    ])
+                    log(f'cpu priority reset for {name} -> 1024 shares')
+                except Exception as e:
+                    remaining[name] = entry
+                    log(f'docker cpu priority reset failed for {name}: {e}')
+            if remaining:
+                _write_json_file(CPU_PRIORITY_META_PATH, {'enabled': False, 'vms': remaining})
+            else:
+                try:
+                    os.remove(CPU_PRIORITY_META_PATH)
+                except FileNotFoundError:
+                    pass
+            return {}
+
+        desired = _desired_cpu_shares(vm_states, cfg)
+        previous = metadata['vms']
+        applied = {}
         for name, share in desired.items():
-            if applied.get(name) == share:
+            identity = _container_identity(name)
+            prior = previous.get(name) if isinstance(previous.get(name), dict) else {}
+            if (prior.get('share') == share and identity and
+                    prior.get('containerId') == identity):
+                applied[name] = {'share': share, 'containerId': identity}
                 continue
             try:
                 subprocess.check_call(['docker', 'update', f'--cpu-shares={share}', f'blobevm_{name}'])
-                applied[name] = share
+                applied[name] = {'share': share, 'containerId': identity}
                 log(f'cpu priority for {name} -> {share} shares')
             except Exception as e:
                 log(f'docker cpu priority update failed for {name}: {e}')
-        if applied:
-            _write_json_file(CPU_PRIORITY_META_PATH, applied)
-        return applied
+        if applied or not desired:
+            _write_json_file(CPU_PRIORITY_META_PATH, {'enabled': True, 'vms': applied})
+        return {name: item['share'] for name, item in applied.items()}
     except Exception as e:
         log(f'cpu priority error: {e}')
         return {}
