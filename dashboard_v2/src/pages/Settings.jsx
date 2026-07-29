@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import Button from '../components/Button'
+import apiFetch from '../lib/fetchWrapper'
 
 function readInt(key, fallback){
   const v = localStorage.getItem(key)
@@ -16,14 +17,21 @@ export default function Settings(){
   const [cpuAbs, setCpuAbs] = useState(parseFloat(localStorage.getItem('nbv2_announce_cpu_absolute') || '85'))
   const [memAbs, setMemAbs] = useState(parseFloat(localStorage.getItem('nbv2_announce_mem_absolute') || '90'))
   const [cooldown, setCooldown] = useState(readInt('nbv2_announce_cooldown', 60000))
+  const [adminVmSso, setAdminVmSso] = useState(true)
   const [feedback, setFeedback] = useState('')
+
+  useEffect(()=>{
+    apiFetch('/settings').then(r=>r.json()).then(data=>{
+      setAdminVmSso(data.admin_vm_sso !== false)
+    }).catch(()=>{})
+  }, [])
 
   useEffect(()=>{
     const t = feedback && setTimeout(()=>setFeedback(''), 3000)
     return ()=>{ if(t) clearTimeout(t) }
   }, [feedback])
 
-  function save(){
+  async function save(){
     localStorage.setItem('nbv2_update_interval', String(updateInterval))
     localStorage.setItem('nbv2_animations', animations ? '1' : '0')
     localStorage.setItem('nbv2_announce_cpu_delta', String(cpuDelta))
@@ -31,6 +39,14 @@ export default function Settings(){
     localStorage.setItem('nbv2_announce_cpu_absolute', String(cpuAbs))
     localStorage.setItem('nbv2_announce_mem_absolute', String(memAbs))
     localStorage.setItem('nbv2_announce_cooldown', String(cooldown))
+    try{
+      const r = await apiFetch('/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({adminVmSso}) })
+      const data = await r.json().catch(()=>({}))
+      if(!r.ok || data.ok === false) throw new Error(data.error || 'Failed saving VM access setting')
+    }catch(e){
+      setFeedback(`Save failed: ${e.message}`)
+      return
+    }
     window.dispatchEvent(new Event('nbv2:settings'))
     setFeedback('Saved')
     // hint to consumer components to re-read (they read from localStorage on each poll)
@@ -50,6 +66,11 @@ export default function Settings(){
             <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
               <label style={{minWidth:160,color:'var(--muted)'}}>Enable animations</label>
               <input type="checkbox" checked={animations} onChange={e=>setAnimations(e.target.checked)} />
+            </div>
+            <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
+              <label style={{minWidth:160,color:'var(--muted)'}}>Admin VM SSO</label>
+              <input type="checkbox" checked={adminVmSso} onChange={e=>setAdminVmSso(e.target.checked)} />
+              <span style={{color:'var(--muted)',fontSize:12}}>Open restricted VMs with the active dashboard session</span>
             </div>
 
             <div style={{marginTop:12,fontSize:13,color:'var(--muted)'}}>Announcements thresholds</div>
@@ -79,7 +100,7 @@ export default function Settings(){
 
             <div style={{marginTop:14,display:'flex',gap:8}}>
               <Button onClick={save}>Save Settings</Button>
-              <Button onClick={()=>{ setUpdateInterval(3000); setAnimations(true); setCpuDelta(20); setMemDelta(25); setCpuAbs(85); setMemAbs(90); setCooldown(60000); }}>Reset</Button>
+              <Button onClick={()=>{ setUpdateInterval(3000); setAnimations(true); setAdminVmSso(true); setCpuDelta(20); setMemDelta(25); setCpuAbs(85); setMemAbs(90); setCooldown(60000); }}>Reset</Button>
             </div>
             {feedback ? <div style={{marginTop:8,color:'var(--green)'}}>{feedback}</div> : null}
           </div>

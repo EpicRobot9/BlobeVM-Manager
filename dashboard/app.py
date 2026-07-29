@@ -1292,6 +1292,18 @@ def _vm_access_mode(name: str) -> str:
     mode = str(meta.get('access_mode') or 'public').strip().lower()
     return mode if mode in ('public', 'restricted') else 'public'
 
+
+def _admin_vm_sso_enabled() -> bool:
+    """Whether a valid Dashboard-Auth session may open restricted VMs."""
+    cfg = _load_dashboard_settings()
+    value = cfg.get('admin_vm_sso', True) if isinstance(cfg, dict) else True
+    return value is not False
+
+
+def _admin_vm_sso_authenticated() -> bool:
+    return _admin_vm_sso_enabled() and _verify_v2_token(request.cookies.get('Dashboard-Auth', ''))
+
+
 def _user_can_access_vm(user, name: str) -> bool:
     if _vm_access_mode(name) == 'public':
         return True
@@ -1315,7 +1327,7 @@ def _render_vm_denied(name: str, user):
     return Response(page, mimetype='text/html')
 
 def _enforce_vm_user_access(name: str):
-    if _vm_access_mode(name) == 'public':
+    if _vm_access_mode(name) == 'public' or _admin_vm_sso_authenticated():
         return None
     user = _current_portal_user()
     next_url = request.path
@@ -1925,11 +1937,18 @@ def api_get_settings():
 @app.post('/dashboard/api/settings')
 @auth_required
 def api_set_settings():
-    title = request.values.get('title','').strip()
-    favicon = request.values.get('favicon','').strip()
+    data = request.get_json(silent=True) if request.is_json else None
+    data = data if isinstance(data, dict) else request.values
+    title = str(data.get('title','') or '').strip()
+    favicon = str(data.get('favicon','') or '').strip()
     cfg = _load_dashboard_settings()
     if title:
         cfg['title'] = title
+    if 'adminVmSso' in data or 'admin_vm_sso' in data:
+        raw_sso = data.get('adminVmSso', data.get('admin_vm_sso'))
+        if isinstance(raw_sso, str):
+            raw_sso = raw_sso.strip().lower() in ('1', 'true', 'yes', 'on')
+        cfg['admin_vm_sso'] = bool(raw_sso)
     # Allow setting the v2 dashboard admin password from the old dashboard settings UI
     # Do not write the legacy dashboard password. New credentials are managed
     # exclusively by BLOBEDASH_USER/BLOBEDASH_PASS in /opt/blobe-vm/.env.
@@ -2044,6 +2063,8 @@ def api_upload_vm_favicon(name):
 
 @app.get('/dashboard/auth/vm/<name>')
 def dashboard_vm_forward_auth(name):
+    if _admin_vm_sso_authenticated():
+        return Response('OK', 200)
     user = _current_portal_user()
     next_url = request.headers.get('X-Forwarded-Uri') or request.args.get('next') or f'/dashboard/vm/{name}/'
     ext_base = _external_base_url()
