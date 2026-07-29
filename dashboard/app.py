@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file, redirect
 import optimizer as dash_optimizer
+from runtime_stats import get_docker_stats
 import hmac, hashlib, time, base64
 try:
     import psutil
@@ -2695,38 +2696,22 @@ def python_gather_stats():
             out['swap']['used'] = int(sp[2])
     except Exception:
         pass
-    # docker stats fallback
+    # Docker stats are shared with the VM endpoint and optimizer.
     try:
-        d = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}"], text=True)
-        for l in d.splitlines():
-            if not l.strip():
-                continue
-            parts = l.split('|')
-            if len(parts) >= 4:
-                name = parts[0]
-                cpu = 0.0
-                try:
-                    cpu = float(parts[1].strip().replace('%',''))
-                except Exception:
-                    cpu = 0.0
-                memperc = 0.0
-                try:
-                    memperc = float(parts[2].strip().replace('%',''))
-                except Exception:
-                    memperc = 0.0
-                memusage = parts[3].strip()
-                # attempt to parse bytes from memusage like '12.3MiB / 1.95GiB'
-                m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
-                memBytes = 0
-                if m:
-                    n = float(m.group(1)); u = m.group(2).upper()
-                    mul = 1024
-                    if u.startswith('M'):
-                        mul = 1024*1024
-                    elif u.startswith('G'):
-                        mul = 1024*1024*1024
-                    memBytes = int(n * mul)
-                out['containers'].append({'name': name, 'cpu': cpu, 'memperc': memperc, 'memBytes': memBytes})
+        for record in get_docker_stats():
+            memusage = str(record['mem_usage'])
+            m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
+            memBytes = 0
+            if m:
+                n = float(m.group(1)); u = m.group(2).upper()
+                mul = 1024
+                if u.startswith('M'):
+                    mul = 1024*1024
+                elif u.startswith('G'):
+                    mul = 1024*1024*1024
+                memBytes = int(n * mul)
+            out['containers'].append({'name': record['name'], 'cpu': record['cpu_percent'],
+                                      'memperc': record['mem_percent'], 'memBytes': memBytes})
     except Exception:
         pass
     return out
@@ -3303,40 +3288,17 @@ def dashboard_v2_vm_stats():
     """Return per-VM CPU and memory percentages by calling `docker stats --no-stream`.
     The result maps VM name (without the `blobevm_` prefix) to {'cpu_percent': float, 'mem_percent': float}.
     """
-    try:
-        out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}'], text=True)
-    except subprocess.CalledProcessError as e:
-        return jsonify({'ok': False, 'error': str(e), 'output': getattr(e, 'output', '')}), 500
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
     stats = {}
     try:
-        for line in out.splitlines():
-            if not line.strip():
-                continue
-            try:
-                parts = line.split('|')
-                cname = parts[0].strip()
-                cpu_raw = parts[1].strip() if len(parts) > 1 else ''
-                mem_raw = parts[2].strip() if len(parts) > 2 else ''
-                # strip trailing percent sign
-                cpu = 0.0
-                mem = 0.0
-                try:
-                    cpu = float(cpu_raw.strip().rstrip('%'))
-                except Exception:
-                    cpu = 0.0
-                try:
-                    mem = float(mem_raw.strip().rstrip('%'))
-                except Exception:
-                    mem = 0.0
-                # Normalize VM name if container is named blobevm_<name>
-                vmname = cname
-                if vmname.startswith('blobevm_'):
-                    vmname = vmname[len('blobevm_'):]
-                stats[vmname] = {'cpu_percent': round(cpu,2), 'mem_percent': round(mem,2), 'container_name': cname}
-            except Exception:
-                continue
+        for record in get_docker_stats():
+            cname = record['name']
+            cpu = record['cpu_percent']
+            mem = record['mem_percent']
+            # Normalize VM name if container is named blobevm_<name>
+            vmname = cname
+            if vmname.startswith('blobevm_'):
+                vmname = vmname[len('blobevm_'):]
+            stats[vmname] = {'cpu_percent': round(cpu,2), 'mem_percent': round(mem,2), 'container_name': cname}
         return jsonify({'ok': True, 'vms': stats})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500

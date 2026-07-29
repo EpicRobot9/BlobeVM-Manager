@@ -17,6 +17,7 @@ import threading
 import subprocess
 import re
 import shutil
+from runtime_stats import get_docker_stats
 
 STATE_DIR = os.environ.get('BLOBEDASH_STATE', '/opt/blobe-vm')
 LOG_DIR = '/var/blobe/logs/optimizer'
@@ -495,35 +496,23 @@ def gather_stats():
         fallback = _meminfo_stats()
         out['mem'] = fallback.get('mem') or {}
         out['swap'] = fallback.get('swap') or {}
-    # docker stats
     try:
-        d = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}'], text=True)
-        for l in d.splitlines():
-            if not l.strip():
-                continue
-            parts = l.split('|')
-            if len(parts) >= 4:
-                name = parts[0]
-                try:
-                    cpu = float(parts[1].strip().replace('%', ''))
-                except Exception:
-                    cpu = 0.0
-                try:
-                    memperc = float(parts[2].strip().replace('%', ''))
-                except Exception:
-                    memperc = 0.0
-                memusage = parts[3].strip()
-                m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
-                memBytes = 0
-                if m:
-                    n = float(m.group(1)); u = m.group(2).upper()
-                    mul = 1024
-                    if u.startswith('M'):
-                        mul = 1024*1024
-                    elif u.startswith('G'):
-                        mul = 1024*1024*1024
-                    memBytes = int(n * mul)
-                out['containers'].append({'name': name, 'cpu': cpu, 'memperc': memperc, 'memBytes': memBytes})
+        for record in get_docker_stats():
+            name = record['name']
+            cpu = record['cpu_percent']
+            memperc = record['mem_percent']
+            memusage = record['mem_usage']
+            m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
+            memBytes = 0
+            if m:
+                n = float(m.group(1)); u = m.group(2).upper()
+                mul = 1024
+                if u.startswith('M'):
+                    mul = 1024*1024
+                elif u.startswith('G'):
+                    mul = 1024*1024*1024
+                memBytes = int(n * mul)
+            out['containers'].append({'name': name, 'cpu': cpu, 'memperc': memperc, 'memBytes': memBytes})
     except Exception:
         pass
     return out
@@ -656,21 +645,13 @@ def _run_memory_guard(cfg, vm_state_map=None, host_pressure=None):
     vm_state_map = vm_state_map or {}
     host_pressure = host_pressure or {}
     try:
-        out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.MemPerc}} {{.MemUsage}}'], text=True)
-        for l in out.splitlines():
-            parts = l.strip().split()
-            if not parts:
-                continue
-            name = parts[0]
+        for record in get_docker_stats():
+            name = record['name']
             if not name.startswith('blobevm_'):
                 continue
             vm_name = name[len('blobevm_'):]
             vm_state = vm_state_map.get(vm_name)
-            percRaw = parts[1] if len(parts) > 1 else '0%'
-            try:
-                perc = float(percRaw.replace('%', ''))
-            except Exception:
-                perc = 0.0
+            perc = record['mem_percent']
             threshold = cfg.get('memoryThreshold', 60)
             if perc >= threshold:
                 if _is_vm_protected(vm_state):
@@ -694,21 +675,13 @@ def _run_cpu_guard(cfg, vm_state_map=None, host_pressure=None):
     vm_state_map = vm_state_map or {}
     host_pressure = host_pressure or {}
     try:
-        out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.CPUPerc}}'], text=True)
-        for l in out.splitlines():
-            parts = l.strip().split()
-            if not parts:
-                continue
-            name = parts[0]
+        for record in get_docker_stats():
+            name = record['name']
             if not name.startswith('blobevm_'):
                 continue
             vm_name = name[len('blobevm_'):]
             vm_state = vm_state_map.get(vm_name)
-            percRaw = parts[1] if len(parts) > 1 else '0%'
-            try:
-                perc = float(percRaw.replace('%', ''))
-            except Exception:
-                perc = 0.0
+            perc = record['cpu_percent']
             threshold = cfg.get('cpuThreshold', 70)
             if perc >= threshold:
                 if _is_vm_protected(vm_state):
@@ -746,17 +719,14 @@ def _run_swap_guard(cfg, vm_state_map=None, host_pressure=None):
                     relief['reason'] = 'swap-pressure-relief'
                     relief['perc'] = perc
                     return relief
-                stats = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.MemUsage}}'], text=True)
                 heaviest = None; maxBytes = 0
-                for l in stats.splitlines():
-                    p = l.strip().split()
-                    if not p: continue
-                    name = p[0]
+                for record in get_docker_stats():
+                    name = record['name']
                     if not name.startswith('blobevm_'): continue
                     vm_name = name[len('blobevm_'):]
                     if _is_vm_protected(vm_state_map.get(vm_name)):
                         continue
-                    usage = p[1] if len(p) > 1 else '0'
+                    usage = record['mem_usage']
                     m = re.search(r'([0-9.]+)([KMG]i?)B', usage)
                     bytes_ = 0
                     if m:
