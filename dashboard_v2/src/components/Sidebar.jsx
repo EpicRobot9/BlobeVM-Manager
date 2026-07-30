@@ -1,7 +1,8 @@
 import React from 'react'
 import { NavLink } from 'react-router-dom'
-import { House, DesktopTower, ChartBar, FileText, SlidersHorizontal, Gear, Users, Code, Wrench, CaretLeft, X, CubeTransparent } from '@phosphor-icons/react'
+import { House, DesktopTower, ChartBar, FileText, SlidersHorizontal, Gear, Users, Code, Wrench, CaretLeft, X } from '@phosphor-icons/react'
 import { PRODUCT_NAME, MANAGER_NAME } from '../brand'
+import EpicVMMark from './EpicVMMark'
 
 const items = [
   {to:'/', label:'Home Overview', icon:House}, {to:'/vm', label:'VM Manager', icon:DesktopTower},
@@ -11,7 +12,7 @@ const items = [
   {to:'/tools', label:'Advanced Tools', icon:Wrench}
 ]
 
-function BrandMark(){ return <CubeTransparent className="brand-mark" size={38} weight="duotone" aria-hidden="true"/> }
+function BrandMark(){ return <EpicVMMark className="brand-mark" size={38} /> }
 
 export default function Sidebar({collapsed, onCollapse, mobileOpen, onMobileClose}){
   return <div className="sidebar-inner">
