@@ -35,5 +35,5 @@ test('login and sidebar use the EpicVM mark without removing their brand labels'
 })
 
 test('document declares the EpicVM SVG favicon', () => {
-  assert.match(read('index.html'), /<link[^>]+rel=["']icon["'][^>]+href=["']\/favicon\.svg["']/)
+  assert.match(read('index.html'), /<link[^>]+rel=["']icon["'][^>]+href=["']\/Dashboard\/favicon\.svg["']/)
 })
