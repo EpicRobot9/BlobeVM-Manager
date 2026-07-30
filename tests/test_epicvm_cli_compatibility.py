@@ -57,3 +57,11 @@ def test_doctor_checks_canonical_binary_and_reports_legacy_compatibility():
 
     assert "-x /usr/local/bin/epicvm" in doctor
     assert "/usr/local/bin/epicvm" in doctor
+
+
+def test_canonical_cli_has_epicvm_facing_copy():
+    canonical = CANONICAL.read_text()
+
+    assert "EpicVM CLI" in canonical
+    assert "BlobeVM Manager" not in canonical
+    assert "BlobeVM dashboard" not in canonical

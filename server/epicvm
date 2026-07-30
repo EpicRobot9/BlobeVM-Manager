@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-# BlobeVM Manager CLI
+# EpicVM CLI
 # Commands:
 #   list
 #   create <name>
@@ -814,7 +814,7 @@ cmd_doctor() {
   report_warn() { printf '[%s] %s\n' "$yellow" "$1"; warnings=$((warnings+1)); }
   report_fail() { printf '[%s] %s\n' "$red" "$1"; failures=$((failures+1)); }
 
-  echo 'BlobeVM Manager Doctor'
+  echo 'EpicVM Doctor'
   echo '======================'
 
   [[ -d "$STATE_DIR" ]] && report_ok "state dir present: $STATE_DIR" || report_fail "state dir missing: $STATE_DIR"
@@ -1546,7 +1546,7 @@ main() {
 cmd_nuke() {
   local assume_yes="${1:-}"
   if [[ "$assume_yes" != "--yes" ]]; then
-    echo "This will remove ALL BlobeVM instances, BlobeVM dashboard, Traefik stack (if deployed by BlobeVM), data, images, related volumes, and the manager binary."
+    echo "This will remove ALL EpicVM instances, EpicVM dashboard, Traefik stack (if deployed by EpicVM), data, images, related volumes, and the manager binary."
     read -rp "Type 'NUKE' to confirm: " confirm
     if [[ "$confirm" != "NUKE" ]]; then
       echo "Aborted."
@@ -1561,19 +1561,19 @@ cmd_nuke() {
     docker rm -f "$cname" >/dev/null 2>&1 || true
   done
 
-  echo "Removing BlobeVM dashboard containers (blobedash, blobedash-proxy) if present..."
+  echo "Removing EpicVM dashboard containers (blobedash, blobedash-proxy) if present..."
   for cname in blobedash blobedash-proxy; do
     if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
       docker rm -f "$cname" >/dev/null 2>&1 || true
     fi
   done
 
-  echo "Bringing down Traefik stack if deployed by BlobeVM..."
+  echo "Bringing down Traefik stack if deployed by EpicVM..."
   if [[ -f /opt/blobe-vm/traefik/docker-compose.yml ]]; then
     (cd /opt/blobe-vm/traefik && docker compose down --remove-orphans) || true
   fi
 
-  echo "Removing BlobeVM images (all tags under repository 'blobevm')..."
+  echo "Removing EpicVM images (all tags under repository 'blobevm')..."
   docker images --format '{{.Repository}}:{{.Tag}}' | awk -F: '$1=="blobevm" {print $0}' | xargs -r docker rmi -f >/dev/null 2>&1 || true
 
   echo "Removing proxy network if empty..."
@@ -1586,7 +1586,7 @@ cmd_nuke() {
     fi
   fi
 
-  echo "Removing BlobeVM-related Docker volumes (best-effort)..."
+  echo "Removing EpicVM-related Docker volumes (best-effort)..."
   docker volume ls --format '{{.Name}}' | grep -Ei '(blobevm|blobe-vm|blobedash|blobe)' | xargs -r docker volume rm >/dev/null 2>&1 || true
 
   echo "Removing data directory /opt/blobe-vm ..."
@@ -1596,7 +1596,7 @@ cmd_nuke() {
   rm -f /usr/local/bin/epicvm
   rm -f /usr/local/bin/blobe-vm-manager
 
-  echo "Done. BlobeVM resources removed (no global Docker prune performed)."
+  echo "Done. EpicVM resources removed (no global Docker prune performed)."
 }
 
 main "$@"

@@ -44,3 +44,8 @@ def test_quick_installer_accepts_epicvm_defaults_and_keeps_legacy_exports():
     assert "EPICVM_AUTO_CREATE_VM" in QUICK_INSTALLER
     assert "EPICVM_INITIAL_VM_NAME" in QUICK_INSTALLER
     assert "export BLOBEVM_ASSUME_DEFAULTS BLOBEVM_ENABLE_DASHBOARD BLOBEVM_AUTO_CREATE_VM BLOBEVM_INITIAL_VM_NAME" in QUICK_INSTALLER
+
+
+def test_canonical_installers_use_epicvm_facing_copy():
+    assert "BlobeVM Manager" not in INSTALLER
+    assert "BlobeVM Host/VPS Installer" not in SERVER_INSTALLER

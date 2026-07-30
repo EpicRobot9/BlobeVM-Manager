@@ -3,11 +3,11 @@
 set -euo pipefail
 set -o errtrace
 
-# BlobeVM Host/VPS Installer
+# EpicVM Host/VPS Installer
 # - Installs Docker and Traefik (default) OR runs in direct mode without a proxy
 # - Sets up a shared docker network "proxy" (Traefik mode only)
 # - Deploys Traefik (HTTP only by default, optional HTTPS via ACME) unless disabled
-# - Builds the BlobeVM image from this repository
+# - Builds the EpicVM image from this repository
 # - Installs the blobe-vm-manager CLI
 # - Optionally creates a first VM instance and prints its URL
 #
@@ -183,7 +183,7 @@ prompt_dashboard_auth() {
 
   local dash_user dash_pass dash_pass_confirm dash_user_input
   dash_user="${BLOBEDASH_USER:-admin}"
-  read -rp "BlobeVM dashboard username [${dash_user}]: " dash_user_input || true
+  read -rp "EpicVM dashboard username [${dash_user}]: " dash_user_input || true
   [[ -n "${dash_user_input:-}" ]] && dash_user="${dash_user_input}"
   while true; do
     read -rsp "Preferred dashboard password: " dash_pass; echo
@@ -209,7 +209,7 @@ ensure_dashboard_secrets() {
 }
 
 prompt_config() {
-  echo "--- BlobeVM Host Configuration ---"
+  echo "--- EpicVM Host Configuration ---"
 
   if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
     echo "Mode: Direct (no Traefik). Each VM will be published on a unique high port."
@@ -1143,7 +1143,7 @@ services:
       - --certificatesresolvers.myresolver.acme.httpchallenge=true
       - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
 EOF
-    # Constrain Traefik provider to only discover BlobeVM-managed containers
+    # Constrain Traefik provider to only discover EpicVM-managed containers
     echo '      - --providers.docker.constraints=Label(`com.blobevm.managed`,`1`)' >> "$compose_file"
     if [[ "${FORCE_HTTPS:-0}" -eq 1 ]]; then
       cat >> "$compose_file" <<EOF
@@ -1197,7 +1197,7 @@ services:
       - --accesslog=true
       - --api.dashboard=true
 EOF
-    # Constrain Traefik provider to only discover BlobeVM-managed containers
+    # Constrain Traefik provider to only discover EpicVM-managed containers
     echo '      - --providers.docker.constraints=Label(`com.blobevm.managed`,`1`)' >> "$compose_file"
     {
       echo "    ports:";
@@ -1411,7 +1411,7 @@ build_image() {
   img_id=$(docker images -q "$image" 2>/dev/null || true)
 
   if [[ "$force" == "1" || -z "$img_id" || "$cur_hash" != "$prev_hash" ]]; then
-    echo "Building the BlobeVM image from $REPO_DIR ..."
+    echo "Building the EpicVM image from $REPO_DIR ..."
     docker build -t "$image" "$REPO_DIR"
     echo "$cur_hash" > "$hash_file" || true
     echo "Build complete."
@@ -1566,7 +1566,7 @@ maybe_create_first_vm() {
 
 print_success() {
   echo
-  echo "BlobeVM host setup complete."
+  echo "EpicVM host setup complete."
   local base_path="${BASE_PATH:-/vm}"
   local http_suffix=""
   local https_suffix=""
@@ -1663,7 +1663,7 @@ main() {
   ASSUME_DEFAULTS=${ASSUME_DEFAULTS:-0}
 
   if [[ "$UPDATE_MODE" -eq 1 ]]; then
-    echo "Detected existing BlobeVM installation."
+    echo "Detected existing EpicVM installation."
     local reuse_cfg
     if [[ "${BLOBEVM_REUSE_SETTINGS:-}" == "1" ]]; then
       reuse_cfg="y"
