@@ -21,6 +21,7 @@ set -o errtrace
 #   DISABLE_DASHBOARD (legacy flag to skip dashboard deployment)
 #   BLOBEVM_NO_TRAEFIK (1 to run without Traefik; VMs get unique high ports)
 #   BLOBEVM_DIRECT_PORT_START (first port to try in direct/no-Traefik mode; default 20000)
+#   EPICVM_* equivalents are the canonical public names; BLOBEVM_* names remain compatible.
 
 trap 'echo "[ERROR] ${BASH_SOURCE[0]}: line ${LINENO} failed: ${BASH_COMMAND}" >&2' ERR
 
@@ -63,6 +64,33 @@ load_existing_env() {
     v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
     export "$k"="$v"
   done < "$env_file"
+}
+
+# Normalize the public EPICVM_* interface once, after persisted settings are loaded.
+# Keep all downstream logic on its historical BLOBEVM_* and legacy variable names.
+normalize_epicvm_environment() {
+  [[ -n "${EPICVM_DOMAIN:-}" ]] && BLOBEVM_DOMAIN="${EPICVM_DOMAIN}"
+  [[ -n "${EPICVM_EMAIL:-}" ]] && BLOBEVM_EMAIL="${EPICVM_EMAIL}"
+  [[ -n "${EPICVM_HTTP_PORT:-}" ]] && BLOBEVM_HTTP_PORT="${EPICVM_HTTP_PORT}"
+  [[ -n "${EPICVM_HTTPS_PORT:-}" ]] && BLOBEVM_HTTPS_PORT="${EPICVM_HTTPS_PORT}"
+  [[ -n "${EPICVM_DIRECT_PORT_START:-}" ]] && BLOBEVM_DIRECT_PORT_START="${EPICVM_DIRECT_PORT_START}"
+
+  if [[ -n "${EPICVM_ENABLE_DASHBOARD:-}" ]]; then
+    BLOBEVM_ENABLE_DASHBOARD="${EPICVM_ENABLE_DASHBOARD}"
+    ENABLE_DASHBOARD="$(normalize_bool "${EPICVM_ENABLE_DASHBOARD}")"
+    DISABLE_DASHBOARD=0
+  elif [[ -n "${BLOBEVM_ENABLE_DASHBOARD:-}" ]]; then
+    ENABLE_DASHBOARD="$(normalize_bool "${BLOBEVM_ENABLE_DASHBOARD}")"
+    DISABLE_DASHBOARD=0
+  fi
+
+  [[ -n "${EPICVM_INITIAL_VM_NAME:-}" ]] && BLOBEVM_INITIAL_VM_NAME="${EPICVM_INITIAL_VM_NAME}"
+  if [[ -n "${EPICVM_NO_TRAEFIK:-}" ]]; then
+    BLOBEVM_NO_TRAEFIK="${EPICVM_NO_TRAEFIK}"
+  elif [[ -n "${EPICVM_DIRECT_MODE:-}" ]]; then
+    BLOBEVM_NO_TRAEFIK="${EPICVM_DIRECT_MODE}"
+  fi
+  [[ -n "${EPICVM_FORCE_REBUILD:-}" ]] && BLOBEVM_FORCE_REBUILD="${EPICVM_FORCE_REBUILD}"
 }
 
 normalize_bool() {
@@ -1630,6 +1658,7 @@ main() {
     load_existing_env || true
   fi
 
+  normalize_epicvm_environment
   apply_env_overrides
   ASSUME_DEFAULTS=${ASSUME_DEFAULTS:-0}
 
