@@ -50,7 +50,7 @@ usage() {
   cat <<USAGE
 ${SCRIPT_NAME} [options] [-- installer-args]
 
-Clone or update the BlobeVM repository and invoke server/install.sh.
+Clone or update the EpicVM repository and invoke server/install.sh.
 
 Options:
   -b, --branch <name>     Git branch (default: ${BRANCH})
