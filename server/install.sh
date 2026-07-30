@@ -331,9 +331,9 @@ prompt_config() {
   fi
   echo "  Web Dashboard: $([[ "${ENABLE_DASHBOARD}" -eq 1 ]] && echo yes || echo no) (set DISABLE_DASHBOARD=1 to skip)"
   if [[ -n "${BLOBEDASH_PASS:-}" ]]; then
-    echo "  BlobeVM Dashboard Auth: enabled (user: ${BLOBEDASH_USER:-admin})"
+    echo "  EpicVM Dashboard Auth: enabled (user: ${BLOBEDASH_USER:-admin})"
   else
-    echo "  BlobeVM Dashboard Auth: disabled"
+    echo "  EpicVM Dashboard Auth: disabled"
   fi
   if [[ -n "${TRAEFIK_DASHBOARD_AUTH}" ]]; then
     local summary_user="${DASH_AUTH_USER:-${TRAEFIK_DASHBOARD_AUTH%%:*}}"
