@@ -1,26 +1,19 @@
-# epicvm CLI
+# EpicVM CLI
 
-This is the canonical server-side CLI installed to `/usr/local/bin/epicvm` by `server/install.sh`.
-The legacy `/usr/local/bin/blobe-vm-manager` command remains available as a compatibility launcher.
-
-## Quick help
+`epicvm` is the canonical server-side CLI installed by the EpicVM installer. It manages VM instances, routing, resources, applications, and the EpicVM Dashboard. It is not a generic host-administration CLI.
 
 ```bash
 epicvm --help
+epicvm doctor
 ```
 
-## VM naming rules
+The legacy `blobe-vm-manager` command remains available as a compatibility alias for existing deployments. New automation should use `epicvm`.
 
-VM names must be 1-63 chars and match:
-- lowercase letters / numbers
-- `.` `_` `-`
-- must start with a letter or number
+## VM naming
 
-Examples:
-- valid: `alpha`, `vm-01`, `dev.desktop_2`
-- invalid: `MyVM`, `_test`, `vm!`
+Names must be 1–63 characters, start with a lowercase letter or number, and contain only lowercase letters, numbers, `.`, `_`, or `-`.
 
-## Core lifecycle
+## Lifecycle and health
 
 ```bash
 epicvm list
@@ -36,34 +29,27 @@ epicvm delete <name>
 epicvm rename <old> <new>
 ```
 
-`doctor` checks the local install and runtime health, including:
-- state dir / env file presence
-- docker CLI + daemon reachability
-- image presence
-- Traefik/direct-mode basics
-- dashboard container + dashboard URL health
-- each VM container and URL reachability
+`doctor` checks the EpicVM installation, Docker reachability, image, routing mode, dashboard, and VM URL health.
 
-## URL/routing helpers
+## URLs and routing
 
 ```bash
 epicvm url <name>
 epicvm open <name>
 epicvm dashboard-url
 epicvm open-dashboard
-
 epicvm set-host <name> <fqdn>
 epicvm clear-host <name>
 epicvm set-host-interactive <name>
-
-epicvm set-path <name> </prefix>
+epicvm set-path <name> /prefix
 epicvm clear-path <name>
-
-epicvm set-base-path </base>
+epicvm set-base-path /desktops
 epicvm clear-base-path
 ```
 
-## Direct mode helpers (`NO_TRAEFIK=1`)
+## Direct mode
+
+When `BLOBEVM_NO_TRAEFIK=1` is set, use high-port helpers:
 
 ```bash
 epicvm list-ports
@@ -71,7 +57,7 @@ epicvm port <name>
 epicvm set-port <name> <port>
 ```
 
-## Rebuild/update commands
+## Rebuild, update, and apps
 
 ```bash
 epicvm pull-repo
@@ -80,15 +66,8 @@ epicvm recreate-all
 epicvm recreate <name> [name2 ...]
 epicvm rebuild-all
 epicvm rebuild-vms <name> [name2 ...]
-epicvm update-and-rebuild
-epicvm update-and-rebuild <name> [name2 ...]
-```
-
-## VM maintenance and apps
-
-```bash
+epicvm update-and-rebuild [name ...]
 epicvm update-vm <name>
-
 epicvm apps
 epicvm app-install <name> <app>
 epicvm app-status <name> <app>
@@ -96,32 +75,20 @@ epicvm app-uninstall <name> <app>
 epicvm app-reinstall <name> <app>
 ```
 
-`apps` lists installer scripts found at:
-- `${REPO_DIR}/root/installable-apps/*.sh`
-- default fallback: `/opt/blobe-vm/root/installable-apps/*.sh`
+Application scripts live in `root/installable-apps/*.sh` in the checkout. Existing deployments may use `/opt/blobe-vm/root/installable-apps/*.sh`.
 
-## Resource controls
+## Resources and destructive operations
 
 ```bash
-epicvm set-limits <name> <cpu> <mem>
+epicvm set-limits <name> <cpu> <memory>
 epicvm clear-limits <name>
 epicvm set-title <name> <title>
-```
-
-## Destructive commands and non-interactive mode
-
-Both commands are interactive by default and require typed confirmation:
-
-```bash
-epicvm delete-all-instances
-epicvm nuke
-```
-
-For automation/CI, pass `--yes` to skip prompts:
-
-```bash
 epicvm delete-all-instances --yes
 epicvm nuke --yes
 ```
 
-Use `nuke` carefully: it removes BlobeVM containers, data in `/opt/blobe-vm`, related images/volumes, and the installed CLI.
+Destructive commands prompt for confirmation unless `--yes` is supplied. `nuke` removes EpicVM containers, legacy state under `/opt/blobe-vm`, related images/volumes, and the installed CLI.
+
+## Compatibility ABI
+
+The following names are intentionally retained for existing deployments: `blobe-vm-manager`, `install-blobevm.sh`, `/opt/blobe-vm`, `blobevm_<name>` container names, `BLOBEVM_*` variables, service IDs `blobedash` and `blobe-optimizer`, and old routes `/dashboard`, `/Dashboard`, and `/vm/<name>/`. They are legacy ABI, not the preferred product-facing names. The canonical installer is `install-epicvm.sh`.
