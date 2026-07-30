@@ -9,6 +9,7 @@ from flask import Flask, jsonify, request, abort, send_from_directory, render_te
 import optimizer as dash_optimizer
 from runtime_stats import get_docker_stats
 import hmac, hashlib, time, base64
+from branding import PRODUCT_NAME, DASHBOARD_TITLE, MANAGER_NAME, AUTH_REALM
 try:
     import psutil
 except Exception:
@@ -98,7 +99,7 @@ def admin_auth_required(fn):
         basic_ok = check_auth(request.headers.get('Authorization'))
         token_ok = _verify_v2_token(request.cookies.get('Dashboard-Auth', ''))
         if not (basic_ok or token_ok):
-            return Response('Auth required', 401, {'WWW-Authenticate':'Basic realm="BlobeVM Dashboard"'})
+            return Response('Auth required', 401, {'WWW-Authenticate': f'Basic realm="{AUTH_REALM}"'})
         if request.method not in ('GET', 'HEAD', 'OPTIONS') and not _same_origin_request():
             return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
         return fn(*args, **kwargs)
@@ -777,9 +778,9 @@ async function checkVM(ev,name){
             const msg = document.getElementById('settings-msg');
             if(j && j.ok){
                 if(msg) msg.textContent = 'Saved.';
-                document.getElementById('dash-title').textContent = title || 'BlobeVM Dashboard';
+                document.getElementById('dash-title').textContent = title || '{{ title }}';
                 // update the browser tab title immediately
-                try{ document.title = title || 'BlobeVM Dashboard'; }catch(e){}
+                try{ document.title = title || '{{ title }}'; }catch(e){}
                 // If a favicon was saved locally, reload page to pick it up
                 if(fav){
                     // small delay then reload to update favicon
@@ -846,7 +847,7 @@ async function checkVM(ev,name){
             if(j && j.ok){
                 el.style.border = '1px solid #10b981';
                 // Update the browser tab title to the saved VM title
-                try{ document.title = title || 'BlobeVM'; }catch(e){}
+                try{ document.title = title || '{{ manager_name }}'; }catch(e){}
                 // Update the small per-VM title display in the list
                 try{ const disp = document.getElementById('vmtitle-display-' + name); if(disp) disp.textContent = title || ''; }catch(e){}
                 setTimeout(()=> el.style.border='', 900);
@@ -1870,7 +1871,7 @@ def _escalate_vm_to_hermes(name: str, reason: str, extra=None):
     with open(esc_path, 'w') as f:
         json.dump(payload, f, indent=2)
     msg = (
-        "BlobeVM recovery request from the dashboard. Act as the recovery operator: "
+        f"{MANAGER_NAME} recovery request from the dashboard. Act as the recovery operator: "
         "inspect the VM and its recent logs, determine why it is down, and recover it "
         "if safe and possible. Verify the result instead of assuming success. "
         f"Host: {payload['host']}. VM: '{name}'. Reason: {reason}. "
@@ -1918,7 +1919,7 @@ def _load_dashboard_settings():
     except Exception:
         pass
     # defaults
-    return {'title': 'BlobeVM Dashboard', 'favicon': ''}
+    return {'title': DASHBOARD_TITLE, 'favicon': ''}
 
 
 def _save_dashboard_settings(cfg: dict):
@@ -2235,7 +2236,7 @@ def portal_login_page():
         return redirect(_safe_portal_next(request.args.get('next')))
     next_url = _safe_portal_next(request.args.get('next'))
     next_js = json.dumps(next_url)
-    page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VM Login</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:420px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px}}input,button{{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#020617;color:#fff;margin-top:10px}}button{{background:#2563eb;cursor:pointer}}.muted{{opacity:.75}}</style></head><body><div class=card><h1>VM Login</h1><div class=muted>Sign in to access restricted BlobeVM instances.</div><form onsubmit="return doLogin(event)"><input id=u placeholder="Username" autocomplete="username" /><input id=p type=password placeholder="Password" autocomplete="current-password" /><button>Sign in</button><div id=err style="color:#fca5a5;margin-top:10px"></div></form></div><script>async function doLogin(e){{e.preventDefault();const r=await fetch('/portal/api/auth/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:document.getElementById('u').value,password:document.getElementById('p').value}})}});const j=await r.json().catch(()=>({{}}));if(j.ok){{location.href={next_js};return false}}document.getElementById('err').textContent=j.error||'Login failed';return false}}</script></body></html>'''
+    page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{MANAGER_NAME} Login</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:420px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px}}input,button{{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#020617;color:#fff;margin-top:10px}}button{{background:#2563eb;cursor:pointer}}.muted{{opacity:.75}}</style></head><body><div class=card><h1>{MANAGER_NAME} Login</h1><div class=muted>Sign in to access restricted {PRODUCT_NAME} instances.</div><form onsubmit="return doLogin(event)"><input id=u placeholder="Username" autocomplete="username" /><input id=p type=password placeholder="Password" autocomplete="current-password" /><button>Sign in</button><div id=err style="color:#fca5a5;margin-top:10px"></div></form></div><script>async function doLogin(e){{e.preventDefault();const r=await fetch('/portal/api/auth/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:document.getElementById('u').value,password:document.getElementById('p').value}})}});const j=await r.json().catch(()=>({{}}));if(j.ok){{location.href={next_js};return false}}document.getElementById('err').textContent=j.error||'Login failed';return false}}</script></body></html>'''
     return Response(page, mimetype='text/html')
 
 @app.get('/dashboard/api/users')
@@ -2974,7 +2975,7 @@ def root():
         fav = '/dashboard/favicon.ico'
     else:
         fav = cfg.get('favicon','')
-    title = cfg.get('title', 'BlobeVM Dashboard')
+    title = cfg.get('title', DASHBOARD_TITLE)
 
     # Only show v2 dashboard link if custom domain is set and container is running
     dashboard_v2_url = None
@@ -2992,7 +2993,7 @@ def root():
     except Exception:
         dashboard_v2_url = None
 
-    return render_template_string(TEMPLATE, title=title, favicon_url=fav, dashboard_v2_url=dashboard_v2_url)
+    return render_template_string(TEMPLATE, title=title, manager_name=MANAGER_NAME, favicon_url=fav, dashboard_v2_url=dashboard_v2_url)
 
 @app.get('/dashboard/api/list')
 @auth_required
@@ -3573,7 +3574,7 @@ def api_reset_all_instances():
 @app.post('/dashboard/api/prune-docker')
 @auth_required
 def api_prune_docker():
-    """Prune only Docker resources explicitly owned by BlobeVM."""
+    """Prune only Docker resources explicitly owned by EpicVM."""
     def worker():
         results = [
             _docker('container', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),
@@ -3936,7 +3937,7 @@ def api_optimizer_logs():
 @app.post('/dashboard/api/optimizer/clean-system')
 @auth_required
 def api_optimizer_clean_system():
-    """Clean only explicitly labelled BlobeVM Docker resources."""
+    """Clean only explicitly labelled EpicVM Docker resources."""
     def worker():
         results = [
             _docker('container', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),

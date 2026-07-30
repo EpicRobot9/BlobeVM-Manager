@@ -1,6 +1,7 @@
 import React from 'react'
 import { NavLink } from 'react-router-dom'
 import { House, DesktopTower, ChartBar, FileText, SlidersHorizontal, Gear, Users, Code, Wrench, CaretLeft, X, CubeTransparent } from '@phosphor-icons/react'
+import { PRODUCT_NAME, MANAGER_NAME } from '../brand'
 
 const items = [
   {to:'/', label:'Home Overview', icon:House}, {to:'/vm', label:'VM Manager', icon:DesktopTower},
@@ -14,7 +15,7 @@ function BrandMark(){ return <CubeTransparent className="brand-mark" size={38} w
 
 export default function Sidebar({collapsed, onCollapse, mobileOpen, onMobileClose}){
   return <div className="sidebar-inner">
-    <div className="brand-row"><BrandMark /><div className="nav-label brand-copy"><strong>BlobeVM</strong><span>Manager</span></div>{mobileOpen && <button className="icon-button mobile-close" aria-label="Close navigation" onClick={onMobileClose}><X size={20}/></button>}</div>
+    <div className="brand-row"><BrandMark /><div className="nav-label brand-copy"><strong>{PRODUCT_NAME}</strong><span>{MANAGER_NAME.split(' ').slice(1).join(' ')}</span></div>{mobileOpen && <button className="icon-button mobile-close" aria-label="Close navigation" onClick={onMobileClose}><X size={20}/></button>}</div>
     <nav aria-label="Main navigation" className="nav-list">
       {items.map(({to,label,icon:Icon}) => <NavLink key={to} to={to} title={collapsed ? label : undefined} onClick={()=>mobileOpen && onMobileClose?.()} className={({isActive})=>'nav-item' + (isActive ? ' active' : '')}><Icon size={21} aria-hidden="true" /><span className="nav-label">{label}</span></NavLink>)}
     </nav>
