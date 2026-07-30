@@ -8,6 +8,7 @@ checked separately and are expected to remain documented throughout.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 
 
@@ -36,6 +37,43 @@ PUBLIC_FILES = (
     "root/config/Desktop/BlobeVM.txt",
 )
 
+_LOCKFILE_NAME = re.compile(r"(?:^|[-_.])lock(?:file)?(?:[-_.]|$)", re.IGNORECASE)
+_HISTORICAL_MARKERS = ("rollback", "history", "historical", "archive", "archived")
+_BINARY_SUFFIXES = {
+    ".7z",
+    ".avif",
+    ".bin",
+    ".bmp",
+    ".class",
+    ".dll",
+    ".eot",
+    ".exe",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jar",
+    ".jpeg",
+    ".jpg",
+    ".lockb",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".otf",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".rar",
+    ".so",
+    ".tar",
+    ".tgz",
+    ".ttf",
+    ".wav",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".zip",
+}
+
 
 def _tracked_files() -> list[Path]:
     """Return tracked paths, making the test independent of cwd/package install."""
@@ -50,24 +88,26 @@ def _tracked_files() -> list[Path]:
 def _human_facing_source_files() -> list[Path]:
     """Select tracked text sources while excluding generated/history artifacts."""
     excluded_parts = {".git", ".hermes", "dist", "screenshots"}
-    excluded_names = {
-        "package-lock.json",
-        "yarn.lock",
-        "pnpm-lock.yaml",
-        "poetry.lock",
-    }
-    historical_markers = ("ROLLBACK", "HISTORY", "historical")
     files = []
     for path in _tracked_files():
         relative = path.relative_to(REPO_ROOT)
-        if any(part in excluded_parts for part in relative.parts):
+        parts_lower = tuple(part.lower() for part in relative.parts)
+        if any(part in excluded_parts for part in parts_lower):
             continue
-        if path.name in excluded_names or any(
-            marker in path.name for marker in historical_markers
-        ):
+        if _LOCKFILE_NAME.search(path.name):
+            continue
+        if any(marker in part for part in parts_lower for marker in _HISTORICAL_MARKERS):
+            continue
+        if path.suffix.lower() in _BINARY_SUFFIXES:
             continue
         try:
-            path.read_text(encoding="utf-8")
+            contents = path.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in contents:
+            continue
+        try:
+            contents.decode("utf-8")
         except (UnicodeDecodeError, OSError):
             continue
         files.append(path)
@@ -95,11 +135,11 @@ def test_legacy_abi_tokens_are_documented_with_reasons() -> None:
 
 def test_current_public_files_contain_no_legacy_public_brand() -> None:
     """RED until later rebrand work removes visible ``BlobeVM`` copy."""
-    tracked = {path.relative_to(REPO_ROOT).as_posix(): path for path in _human_facing_source_files()}
     violations = []
     for relative in PUBLIC_FILES:
-        path = tracked.get(relative)
-        if path is None:
+        path = REPO_ROOT / relative
+        if not path.is_file():
+            violations.append(f"{relative}: missing required public file")
             continue
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), start=1):
