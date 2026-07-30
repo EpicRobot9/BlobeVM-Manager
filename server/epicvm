@@ -1,0 +1,1596 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# BlobeVM Manager CLI
+# Commands:
+#   list
+#   create <name>
+#   start <name>
+#   stop <name>
+#   restart <name>
+#   status <name>
+#  set-title <name> <title>     # set per-VM title and recreate container
+#   set-docker <name> on|off|auto # configure nested Docker startup and recreate container
+#   check [--no-fix] <name>   # HTTP check the VM URL; optional --no-fix to skip auto-resolve
+#   delete <name>
+#   rename <old> <new>        # move instance and switch URL to new name
+#   set-host <name> <fqdn>    # override host (domain mode): e.g., vm1.example.com
+#   clear-host <name>         # remove host override and return to name.<domain>
+#   set-path <name> </prefix> # override path (no-domain mode), e.g., /desk/1
+#   clear-path <name>         # remove path override and return to /vm/<name>
+#   nuke                      # uninstall everything created by server/install.sh
+#   set-host-interactive <name>  # prompts & prints IPs, then asks for host
+#   set-base-path </base>         # set global base path (default /vm)
+#   clear-base-path               # revert global base path to /vm
+#   set-limits <name> <cpu> <mem>  # set CPU (e.g. 0.5 or 2) and memory (e.g. 1g, 512m)
+#   clear-limits <name>            # remove resource limits
+#   rebuild-image                  # docker build image from REPO_DIR
+#   recreate-all                   # recreate all VM containers with current image
+#   recreate <name> [name2 ...]    # recreate only specific VMs
+#   rebuild-all                    # rebuild-image + recreate-all
+#   rebuild-vms <name> [name2..]   # rebuild image then recreate only these VMs
+#   pull-repo                      # git pull in REPO_DIR (if repo)
+#   update-and-rebuild             # pull-repo + rebuild-all
+#   delete-all-instances           # delete all VMs (containers and data) but keep stack/image
+# - In Traefik mode: creates per-instance containers on network "proxy" and routes via Traefik
+# - In Direct mode (NO_TRAEFIK=1): publishes a unique high port per VM without any reverse proxy
+# - Prints the VM URL on create/start
+
+STATE_DIR="${STATE_DIR:-/opt/blobe-vm}"
+INST_DIR="$STATE_DIR/instances"
+ENV_FILE="$STATE_DIR/.env"
+CLI_NAME="${EPICVM_CLI_NAME:-$(basename "$0")}"
+
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090,SC2155
+  while IFS='=' read -r k v; do
+    [[ -z "$k" || "$k" =~ ^# ]] && continue
+    # Remove surrounding single or double quotes
+    v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
+    export "$k"="$v"
+  done < "$ENV_FILE"
+fi
+
+# Defaults for direct mode
+NO_TRAEFIK=${NO_TRAEFIK:-0}
+DIRECT_PORT_START=${DIRECT_PORT_START:-20000}
+
+# --- Port helpers (for direct mode) ---
+port_in_use() {
+  local p="$1"
+  # If Docker is available (typical when manager runs inside dashboard), check published ports first
+  if command -v docker >/dev/null 2>&1; then
+    # Look for bindings like 0.0.0.0:p-> or :::p-> in the Ports column
+    if docker ps --format '{{.Ports}}' | grep -E "(^|[, ])(0\.0\.0\.0|:::)?${p}->" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  # Fallback to socket listeners (works when running on the host)
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1 && return 0
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+find_free_port() {
+  local start="$1"; local attempts="${2:-500}"; local p="$start"; local i=0
+  while (( i < attempts )); do
+    if ! port_in_use "$p"; then echo "$p"; return 0; fi
+    p=$((p+1)); i=$((i+1))
+  done
+  return 1
+}
+
+
+maybe_auth_router_label() {
+  local router="$1"
+  local auth_mw="${2:-}"
+  [[ -z "$auth_mw" ]] && return 0
+  printf '%s' "--label=traefik.http.routers.${router}.middlewares=${auth_mw}"
+}
+
+usage() {
+  local rc="${1:-1}"
+  cat >&2 <<USAGE
+Usage: $CLI_NAME <command> [args]
+
+Commands:
+  help                         # show this help
+  list
+  set-title <name> <title>     # set per-VM title and recreate container
+  set-docker <name> on|off|auto # configure nested Docker startup and recreate container
+  list-ports                   # direct mode: show VM -> port
+  create <name>
+  start <name>
+  stop <name>
+  restart <name>
+  status <name>              # print container status and URL
+  check [--no-fix] <name>    # HTTP check the VM URL; optional --no-fix to skip auto-resolve
+  doctor                     # verify install, runtime dependencies, routing, and dashboard health
+  delete <name>
+  delete-all-instances [--yes] # delete all VM instances and containers (keeps image/stack)
+  rename <old> <new>
+  set-host <name> <fqdn>
+  clear-host <name>
+  set-path <name> </prefix>
+  clear-path <name>
+  port <name>                # direct mode: print assigned port
+  set-port <name> <port>     # direct mode: set fixed port and recreate
+  url <name>                 # print the VM URL
+  open <name>                # try to open the VM URL using a local browser
+  dashboard-url              # print the dashboard URL
+  open-dashboard             # try to open the dashboard URL
+  rebuild-image              # rebuild container image from REPO_DIR
+  recreate-all               # recreate all VM containers using current image
+  recreate <name> [name2..]  # recreate specific VMs using current image
+  rebuild-all                # rebuild image and recreate all VMs
+  rebuild-vms <name> [..]    # rebuild image then recreate specific VMs
+  pull-repo                  # git pull in REPO_DIR (if a git repo)
+  update-and-rebuild [vms..] # pull repo, rebuild image, recreate all or specified VMs
+  update-vm <name>           # apt update/upgrade inside VM container
+  apps                        # list available app installer scripts
+  app-install <name> <app>   # install an app inside the VM (if script exists)
+  app-status <name> <app>    # check if an app binary exists in VM
+  app-uninstall <name> <app> # uninstall/remove an app from the VM
+  app-reinstall <name> <app> # uninstall then install the app
+  nuke [--yes]               # uninstall everything created by installer
+USAGE
+  exit "$rc"
+}
+
+ensure_instance_dir() {
+  mkdir -p "$INST_DIR"
+}
+
+instance_exists() {
+  local name="$1"
+  [[ -d "$INST_DIR/$name" ]]
+}
+
+container_name() {
+  local name="$1"
+  echo "blobevm_${name}"
+}
+
+validate_vm_name() {
+  local name="$1"
+  [[ -n "$name" && "$name" =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]]
+}
+
+require_valid_vm_name() {
+  local name="$1"
+  if ! validate_vm_name "$name"; then
+    echo "Invalid VM name '$name'. Use 1-63 chars: lowercase letters, numbers, dot, underscore, dash; must start with letter/number." >&2
+    exit 1
+  fi
+}
+
+vm_url() {
+  local name="$1"
+  local host_override path_override
+  host_override="$(get_meta "$name" host_override || true)"
+  path_override="$(get_meta "$name" path_override || true)"
+  local base_path="${BASE_PATH:-/vm}"
+  [[ "$base_path" != /* ]] && base_path="/$base_path"
+  base_path="${base_path%/}"
+  local http_port="${HTTP_PORT:-80}"
+  local https_port="${HTTPS_PORT:-443}"
+  # Direct mode: show port-based URL
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    local host_port
+    host_port="$(get_meta "$name" host_port || true)"
+    if [[ -z "$host_port" ]]; then
+      # Assign on demand
+      host_port="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+      if [[ -n "$host_port" ]]; then
+        set_meta "$name" host_port "$host_port"
+      else
+        echo "<port-pending>"; return
+      fi
+    fi
+    local host
+    if [[ -n "$host_override" ]]; then
+      host="$host_override"
+    else
+      host="$(hostname -I | awk '{print $1}')"
+    fi
+    echo "http://${host}:${host_port}/"
+    return
+  fi
+  # If a host override exists, prefer host-based URL even in no-domain mode
+  if [[ -n "$host_override" ]]; then
+    local scheme="http"
+    [[ "${ENABLE_TLS:-0}" -eq 1 ]] && scheme="https"
+    local port_suffix=""
+    if [[ "$scheme" == "http" && "$http_port" != "80" ]]; then port_suffix=":$http_port"; fi
+    if [[ "$scheme" == "https" && "$https_port" != "443" ]]; then port_suffix=":$https_port"; fi
+    echo "${scheme}://${host_override}${port_suffix}/"
+    return
+  fi
+  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    local scheme="http"
+    [[ "${ENABLE_TLS:-0}" -eq 1 ]] && scheme="https"
+    local port_suffix=""
+    if [[ "$scheme" == "http" && "$http_port" != "80" ]]; then port_suffix=":$http_port"; fi
+    if [[ "$scheme" == "https" && "$https_port" != "443" ]]; then port_suffix=":$https_port"; fi
+    local host_url="${scheme}://${name}.${BLOBEVM_DOMAIN}${port_suffix}/"
+    local pfx
+    if [[ -n "$path_override" ]]; then
+      pfx="$path_override"
+    else
+      pfx="${base_path}/${name}/"
+    fi
+    [[ "$pfx" != /* ]] && pfx="/$pfx"
+    [[ "$pfx" != */ ]] && pfx="$pfx/"
+    local root_url="${scheme}://${BLOBEVM_DOMAIN}${port_suffix}${pfx}"
+    if command -v getent >/dev/null 2>&1 && ! getent hosts "${name}.${BLOBEVM_DOMAIN}" >/dev/null 2>&1; then
+      echo "$root_url"
+    else
+      echo "$host_url"
+    fi
+  else
+    local ip
+    ip="$(hostname -I | awk '{print $1}')"
+    local pfx
+    if [[ -n "$path_override" ]]; then
+      pfx="$path_override"
+    else
+      pfx="${base_path}/${name}/"
+    fi
+    # Ensure path has leading and trailing slash
+    [[ "$pfx" != /* ]] && pfx="/$pfx"
+    [[ "$pfx" != */ ]] && pfx="$pfx/"
+    local port_suffix=""
+    if [[ "$http_port" != "80" ]]; then port_suffix=":$http_port"; fi
+    echo "http://$ip${port_suffix}${pfx}"
+  fi
+}
+
+common_labels() {
+  local name="$1"
+  # This ownership marker is intentionally present in both proxy and direct
+  # modes. Dashboard cleanup is restricted to this label.
+  local labels=("--label=com.blobevm.managed=1")
+  # In direct mode, no proxy labels are needed
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    printf '%s ' "${labels[@]}"
+    return 0
+  fi
+  local host_override path_override access_mode
+  host_override="$(get_meta "$name" host_override || true)"
+  path_override="$(get_meta "$name" path_override || true)"
+  access_mode="$(get_meta "$name" access_mode || true)"
+  [[ -z "$access_mode" ]] && access_mode="public"
+  labels+=("--label=traefik.docker.network=${TRAEFIK_NETWORK:-proxy}")
+  labels+=("--label=traefik.enable=true")
+
+  local auth_mw=""
+  if [[ "$access_mode" == "restricted" ]]; then
+    auth_mw="${name}-portal-auth"
+    labels+=("--label=traefik.http.middlewares.${auth_mw}.forwardauth.address=http://blobedash:5000/dashboard/auth/vm/${name}")
+    labels+=("--label=traefik.http.middlewares.${auth_mw}.forwardauth.trustForwardHeader=true")
+  fi
+
+  if [[ -n "$host_override" ]]; then
+    # Host override + dual path router
+    local host "$host_override"
+    local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+    local prefix_path
+    if [[ -n "$path_override" ]]; then
+      prefix_path="$path_override"
+    else
+      prefix_path="${base_path}/${name}"
+    fi
+    [[ "$prefix_path" != /* ]] && prefix_path="/$prefix_path"
+    prefix_path="${prefix_path%/}"
+    local host_path_mw="${name}-host-path"
+    local host_router_mw="${host_path_mw}"
+    if [[ -n "$auth_mw" ]]; then host_router_mw="${host_path_mw},${auth_mw}"; fi
+
+    labels+=(
+      "--label=traefik.http.middlewares.${host_path_mw}.replacepathregex.regex=^/(.*)"
+      "--label=traefik.http.middlewares.${host_path_mw}.replacepathregex.replacement=${prefix_path}/\${1}"
+    )
+
+    labels+=(
+      "--label=traefik.http.routers.${name}.rule=Host(\`$host_override\`)"
+      "--label=traefik.http.routers.${name}.entrypoints=web"
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}.service=${name}"
+      "--label=traefik.http.routers.${name}.middlewares=${host_router_mw}"
+      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
+      "--label=traefik.http.routers.${name}-path.entrypoints=web"
+      "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-path.service=${name}-path"
+      $(maybe_auth_router_label "${name}-path" "$auth_mw")
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.regex=^/vmraw/${name}/?(.*)"
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.replacement=${prefix_path}/\${1}"
+      "--label=traefik.http.routers.${name}-raw.rule=PathPrefix(\`/vmraw/${name}\`)"
+      "--label=traefik.http.routers.${name}-raw.entrypoints=web"
+      "--label=traefik.http.services.${name}-raw.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-raw.service=${name}-raw"
+      "--label=traefik.http.routers.${name}-raw.middlewares=${name}-raw-path"
+      "--label=traefik.http.routers.${name}-raw-secure.rule=PathPrefix(\`/vmraw/${name}\`)"
+      "--label=traefik.http.routers.${name}-raw-secure.entrypoints=websecure"
+      "--label=traefik.http.routers.${name}-raw-secure.tls=true"
+      "--label=traefik.http.services.${name}-raw-secure.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-raw-secure.service=${name}-raw"
+      "--label=traefik.http.routers.${name}-raw-secure.middlewares=${name}-raw-path"
+      "--label=traefik.http.routers.${name}-raw-secure.tls.certresolver=myresolver"
+    )
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
+      # Add HTTPS routers; include certresolver only when TLS is enabled
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host_override\`)"
+        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-secure.tls=true"
+        "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-secure.service=${name}"
+        "--label=traefik.http.routers.${name}-secure.middlewares=${host_router_mw}"
+        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
+        "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-path-secure.tls=true"
+        "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
+        $(maybe_auth_router_label "${name}-path-secure" "$auth_mw")
+      )
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
+        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
+        "--label=traefik.http.routers.${name}-raw-secure.tls.certresolver=myresolver"
+      )
+    fi
+  elif [[ -n "${BLOBEVM_DOMAIN:-}" && "${MERGED_MODE:-0}" -ne 1 ]]; then
+    # Domain mode: host router + path router
+    local host="${name}.${BLOBEVM_DOMAIN}"
+    local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+    local prefix_path="${base_path}/${name}"; [[ "$prefix_path" != /* ]] && prefix_path="/$prefix_path"; prefix_path="${prefix_path%/}"
+    local host_path_mw="${name}-host-path"
+    local host_router_mw="${host_path_mw}"
+    if [[ -n "$auth_mw" ]]; then host_router_mw="${host_path_mw},${auth_mw}"; fi
+    labels+=(
+      "--label=traefik.http.middlewares.${host_path_mw}.replacepathregex.regex=^/(.*)"
+      "--label=traefik.http.middlewares.${host_path_mw}.replacepathregex.replacement=${prefix_path}/\${1}"
+    )
+    labels+=(
+      "--label=traefik.http.routers.${name}.rule=Host(\`$host\`)"
+      "--label=traefik.http.routers.${name}.entrypoints=web"
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}.service=${name}"
+      "--label=traefik.http.routers.${name}.middlewares=${host_router_mw}"
+      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
+      "--label=traefik.http.routers.${name}-path.entrypoints=web"
+      "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-path.service=${name}-path"
+      $(maybe_auth_router_label "${name}-path" "$auth_mw")
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.regex=^/vmraw/${name}/?(.*)"
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.replacement=${prefix_path}/\${1}"
+      "--label=traefik.http.routers.${name}-raw.rule=PathPrefix(\`/vmraw/${name}\`)"
+      "--label=traefik.http.routers.${name}-raw.entrypoints=web"
+      "--label=traefik.http.services.${name}-raw.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-raw.service=${name}-raw"
+      "--label=traefik.http.routers.${name}-raw.middlewares=${name}-raw-path"
+    )
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host\`)"
+        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-secure.tls=true"
+        "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-secure.service=${name}"
+        "--label=traefik.http.routers.${name}-secure.middlewares=${host_router_mw}"
+        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path/\`)&&!Path(\`$prefix_path/\`)"
+        "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-path-secure.tls=true"
+        "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
+        $(maybe_auth_router_label "${name}-path-secure" "$auth_mw")
+        "--label=traefik.http.routers.${name}-raw-secure.rule=PathPrefix(\`/vmraw/${name}\`)"
+        "--label=traefik.http.routers.${name}-raw-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-raw-secure.tls=true"
+        "--label=traefik.http.services.${name}-raw-secure.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-raw-secure.service=${name}-raw"
+        "--label=traefik.http.routers.${name}-raw-secure.middlewares=${name}-raw-path"
+      )
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
+        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
+        "--label=traefik.http.routers.${name}-raw-secure.tls.certresolver=myresolver"
+      )
+    fi
+  else
+    # Path-based routing when no domain present
+    local prefix
+    if [[ -n "$path_override" ]]; then
+      prefix="$path_override"
+    else
+      local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+      prefix="${base_path}/${name}"
+    fi
+    [[ "$prefix" != /* ]] && prefix="/$prefix"
+    prefix="${prefix%/}"
+    labels+=(
+      "--label=traefik.http.routers.${name}.rule=PathPrefix(\`$prefix/\`)&&!Path(\`$prefix/\`)"
+      "--label=traefik.http.routers.${name}.entrypoints=web"
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}.service=${name}"
+      $(maybe_auth_router_label "${name}" "$auth_mw")
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.regex=^/vmraw/${name}/?(.*)"
+      "--label=traefik.http.middlewares.${name}-raw-path.replacepathregex.replacement=${prefix}/\${1}"
+      "--label=traefik.http.routers.${name}-raw.rule=PathPrefix(\`/vmraw/${name}\`)"
+      "--label=traefik.http.routers.${name}-raw.entrypoints=web"
+      "--label=traefik.http.services.${name}-raw.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-raw.service=${name}-raw"
+      "--label=traefik.http.routers.${name}-raw.middlewares=${name}-raw-path"
+      "--label=traefik.http.routers.${name}-raw-secure.rule=PathPrefix(\`/vmraw/${name}\`)"
+      "--label=traefik.http.routers.${name}-raw-secure.entrypoints=websecure"
+      "--label=traefik.http.routers.${name}-raw-secure.tls=true"
+      "--label=traefik.http.services.${name}-raw-secure.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-raw-secure.service=${name}-raw"
+      "--label=traefik.http.routers.${name}-raw-secure.middlewares=${name}-raw-path"
+      "--label=traefik.http.routers.${name}-raw-secure.tls.certresolver=myresolver"
+    )
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.rule=PathPrefix(\`$prefix/\`)&&!Path(\`$prefix/\`)"
+        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-secure.tls=true"
+        "--label=traefik.http.services.${name}-secure.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-secure.service=${name}-secure"
+        $(maybe_auth_router_label "${name}-secure" "$auth_mw")
+        "--label=traefik.http.routers.${name}-raw-secure.rule=PathPrefix(\`/vmraw/${name}\`)"
+        "--label=traefik.http.routers.${name}-raw-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-raw-secure.tls=true"
+        "--label=traefik.http.services.${name}-raw-secure.loadbalancer.server.port=3000"
+        "--label=traefik.http.routers.${name}-raw-secure.service=${name}-raw"
+        "--label=traefik.http.routers.${name}-raw-secure.middlewares=${name}-raw-path"
+      )
+      labels+=("--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver")
+    fi
+  fi
+
+  # Emit all labels newline-delimited so callers can safely read into an array.
+  printf '%s\n' "${labels[@]}"
+}
+
+run_container() {
+  local name="$1"
+  local cname
+  cname="$(container_name "$name")"
+  local save_dir="$INST_DIR/$name/config"
+  mkdir -p "$save_dir"
+
+  local kvm_args=()
+  if [[ "${ENABLE_KVM:-0}" -eq 1 && -e /dev/kvm ]]; then
+    kvm_args=("--device=/dev/kvm" "--security-opt" "seccomp=unconfined")
+  else
+    kvm_args=("--security-opt" "seccomp=unconfined")
+  fi
+
+  local subfolder="/"
+  if [[ "${NO_TRAEFIK}" -ne 1 ]]; then
+    # Always set SUBFOLDER for path access (/vm/<name>/...) so Kasm websocket path
+    # stays under the VM prefix instead of falling back to /websockify.
+    local pfx
+    pfx="$(get_meta "$name" path_override || true)"
+    local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+    if [[ -n "$pfx" ]]; then
+      [[ "$pfx" != /* ]] && pfx="/$pfx"
+      [[ "$pfx" != */ ]] && pfx="$pfx/"
+      subfolder="$pfx"
+    else
+      subfolder="${base_path}/${name}/"
+    fi
+    [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
+  fi
+
+  local publish_args=()
+  local net_args=()
+  local common_label_args=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && common_label_args+=("$line")
+  done < <(common_labels "$name")
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    # Determine and persist a host port for this VM (reassign if busy)
+    local host_port
+    host_port="$(get_meta "$name" host_port || true)"
+    if [[ -n "$host_port" && $(port_in_use "$host_port"; echo $?) -eq 0 ]]; then
+      # Port is currently in use (maybe by stale container); try to free by removing same-name container, else choose new
+      local cname
+      cname="$(container_name "$name")"
+      docker rm -f "$cname" >/dev/null 2>&1 || true
+    fi
+    if [[ -z "$host_port" || $(port_in_use "$host_port"; echo $?) -eq 0 ]]; then
+      host_port="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+      if [[ -z "$host_port" ]]; then
+        echo "Unable to find a free port to expose VM '$name'." >&2
+        exit 1
+      fi
+      set_meta "$name" host_port "$host_port"
+    fi
+    publish_args=( -p "${host_port}:3000" )
+  else
+    net_args=( --network "${TRAEFIK_NETWORK:-proxy}" )
+  fi
+
+  # Allow per-instance TITLE to be set via instance metadata (key: "title").
+  # If set, use that as the container's TITLE env; otherwise fall back to default.
+  local _meta_title
+  _meta_title="$(get_meta "$name" title || true)"
+  local TITLE_ENV
+  if [[ -n "$_meta_title" ]]; then
+    TITLE_ENV="$_meta_title"
+  else
+    TITLE_ENV="${name}"
+  fi
+
+  local graphics_env=()
+  if [[ ! -e /dev/dri/renderD128 ]]; then
+    # Newer baseimage-kasmvnc revisions pass -drinode by default.
+    # On hosts without /dev/dri this can cause blue/blank sessions.
+    graphics_env+=( -e DISABLE_DRI=1 -e DRINODE=/dev/null )
+  fi
+
+  local start_docker_env=()
+  local start_docker
+  start_docker="$(get_meta "$name" start_docker || true)"
+  case "$start_docker" in
+    on)  start_docker_env+=( -e START_DOCKER=true ) ;;
+    off) start_docker_env+=( -e START_DOCKER=false ) ;;
+  esac
+
+  docker run -d \
+    --name "$cname" \
+    --restart unless-stopped \
+    $(limits_flags "$name") \
+    -e PUID="$(id -u)" -e PGID="$(id -g)" \
+    -e TZ=Etc/UTC \
+    -e SUBFOLDER="$subfolder" \
+    -e TITLE="$TITLE_ENV" \
+    ${start_docker_env[@]:-} \
+    ${graphics_env[@]:-} \
+    --shm-size="2gb" \
+    -v "$save_dir":/config \
+    ${publish_args[@]:-} \
+    ${net_args[@]:-} \
+    ${kvm_args[@]} \
+    $(common_labels "$name") \
+    "${BLOBEVM_IMAGE:-blobevm:latest}" \
+    >/dev/null
+}
+
+# Resource limits helpers
+limits_flags() {
+  local name="$1"
+  local cpu mem args=()
+  cpu="$(get_meta "$name" cpu_limit || true)"
+  mem="$(get_meta "$name" mem_limit || true)"
+  if [[ -n "$cpu" ]]; then args+=("--cpus" "$cpu"); fi
+  if [[ -n "$mem" ]]; then args+=("--memory" "$mem"); fi
+  echo "${args[@]:-}"
+}
+
+cmd_set_limits() {
+  local name="$1" cpu="$2" mem="$3"
+  [[ -z "$name" || -z "$cpu" || -z "$mem" ]] && usage
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  set_meta "$name" cpu_limit "$cpu"
+  set_meta "$name" mem_limit "$mem"
+  recreate_container "$name"
+  echo "Limits set for '$name' -> CPU: $cpu, Memory: $mem"
+}
+
+cmd_clear_limits() {
+  local name="$1"; [[ -z "$name" ]] && usage
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  del_meta "$name" cpu_limit || true
+  del_meta "$name" mem_limit || true
+  recreate_container "$name"
+  echo "Limits cleared for '$name'"
+}
+
+# Set per-instance title meta and recreate container so env changes take effect
+cmd_set_title() {
+  local name="$1" title="$2"
+  [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  if [[ -n "$title" ]]; then
+    set_meta "$name" title "$title"
+    echo "Set title for '$name' -> '$title'. Recreating container to apply change..."
+  else
+    del_meta "$name" title || true
+    echo "Cleared title for '$name'. Recreating container to apply change..."
+  fi
+  recreate_container "$name"
+  echo "Done. New URL: $(vm_url "$name")"
+}
+
+cmd_set_docker() {
+  local name="${1:-}" mode="${2:-}"
+  [[ -z "$name" || -z "$mode" ]] && usage
+  require_valid_vm_name "$name"
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  case "$mode" in
+    on|off) set_meta "$name" start_docker "$mode" ;;
+    auto) del_meta "$name" start_docker || true ;;
+    *)
+      echo "Invalid nested Docker mode '$mode'; choose on, off, or auto." >&2
+      exit 1
+      ;;
+  esac
+  recreate_container "$name"
+  echo "Nested Docker set to '$mode' for '$name'"
+}
+
+normalize_docker_mode() {
+  case "${1:-}" in
+    on|off) printf '%s' "$1" ;;
+    *) printf 'auto' ;;
+  esac
+}
+
+cmd_list() {
+  ensure_instance_dir
+  echo "Instances:"
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    if [[ -d "$d" ]]; then
+      local name
+      name="$(basename "$d")"
+      local cname
+      cname="$(container_name "$name")"
+      local st
+      st=$(docker ps --format '{{.Names}} {{.Status}}' | awk -v n="$cname" '$1==n{print $0}')
+      [[ -z "$st" ]] && st="${cname} (stopped)"
+      if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+        local hp
+        hp="$(get_meta "$name" host_port || true)"
+        [[ -n "$hp" ]] && st="${st} (port ${hp})"
+      fi
+      local docker_mode
+      docker_mode="$(normalize_docker_mode "$(get_meta "$name" start_docker || true)")"
+      echo "- $name -> ${st} -> nested-docker=${docker_mode} -> $(vm_url "$name")"
+    fi
+  done
+}
+
+cmd_create() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  require_valid_vm_name "$name"
+  ensure_instance_dir
+  if instance_exists "$name"; then
+    echo "Instance '$name' already exists." >&2
+    exit 1
+  fi
+  mkdir -p "$INST_DIR/$name"
+  # Preseed default config if available and target dir empty
+  local save_dir="$INST_DIR/$name/config"
+  mkdir -p "$save_dir"
+  if [[ -n "${REPO_DIR:-}" && -d "${REPO_DIR}/root/config" ]] && [[ -z "$(ls -A "$save_dir" 2>/dev/null)" ]]; then
+    cp -a "${REPO_DIR}/root/config/." "$save_dir/" 2>/dev/null || true
+  fi
+  run_container "$name"
+  if [[ "$?" -ne 0 ]]; then
+    # Best-effort: if port collision occurred in direct mode, reassign and retry once
+    if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+      local hp
+      hp="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+      if [[ -n "$hp" ]]; then
+        set_meta "$name" host_port "$hp"
+        run_container "$name"
+      fi
+    fi
+  fi
+  echo "Created VM '$name' at: $(vm_url "$name")"
+}
+
+cmd_start() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker start "$cname" >/dev/null
+    echo "Started '$name': $(vm_url "$name")"
+  else
+    echo "No container for '$name'. Creating..."
+    run_container "$name"
+    echo "Started '$name': $(vm_url "$name")"
+  fi
+}
+
+cmd_stop() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker stop "$cname" >/dev/null || true
+    echo "Stopped '$name'"
+  else
+    echo "Instance '$name' not found." >&2
+    exit 1
+  fi
+}
+
+cmd_restart() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker restart "$cname" >/dev/null || { echo "Failed to restart '$name'" >&2; exit 1; }
+    echo "Restarted '$name': $(vm_url "$name")"
+  else
+    echo "No container for '$name'. Creating..."
+    run_container "$name"
+    echo "Started '$name': $(vm_url "$name")"
+  fi
+}
+
+cmd_status() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  local cname st line
+  cname="$(container_name "$name")"
+  line=$(docker ps -a --format '{{.Names}} {{.Status}}' | awk -v n="$cname" '$1==n{print $0}')
+  if [[ -z "$line" ]]; then
+    echo "${name}: not found"
+    exit 1
+  fi
+  st="${line#* }"
+  if [[ -z "$st" ]]; then st="stopped"; fi
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    local hp; hp="$(get_meta "$name" host_port || true)"
+    [[ -n "$hp" ]] && st="${st} (port ${hp})"
+  fi
+  local docker_mode
+  docker_mode="$(normalize_docker_mode "$(get_meta "$name" start_docker || true)")"
+  echo "${name}: ${st}"
+  echo "Nested Docker: ${docker_mode}"
+  echo "URL: $(vm_url "$name")"
+}
+
+cmd_check() {
+  local nofix=0 name
+  if [[ "${1:-}" == "--no-fix" ]]; then
+    nofix=1; shift || true
+  fi
+  name="${1:-}"; [[ -z "$name" ]] && usage
+  local url code
+  url="$(vm_url "$name")"
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl not found. URL: $url"; exit 0
+  fi
+  # Normalize URL to include trailing slash for path-based routing
+  [[ "$url" != */ ]] && url="${url}/"
+
+  # First attempt
+  code=$(curl -sS -o /dev/null -m 8 -L -w '%{http_code}' "$url" || echo "000")
+  if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
+    echo "OK ${code} - $url"; return 0
+  fi
+
+  # If 404 or not reachable, try to resolve by recreating the container and retrying a few times
+  if [[ "$nofix" -eq 1 ]]; then
+    echo "FAIL ${code} - $url"; exit 1
+  fi
+  echo "Check returned ${code}. Attempting auto-resolve for '$name'..." >&2
+  recreate_container "$name"
+  # Wait briefly for container readiness and network attach
+  local i=0 max=8
+  while (( i < max )); do
+    sleep 1
+    code=$(curl -sS -o /dev/null -m 8 -L -w '%{http_code}' "$url" || echo "000")
+    if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then
+      echo "OK ${code} - $url"; return 0
+    fi
+    i=$((i+1))
+  done
+  echo "FAIL ${code} - $url"; exit 1
+}
+
+doctor_probe_url() {
+  local url="$1"
+  local headers code location
+  headers="$(mktemp)"
+  code=$(curl -k -sS -D "$headers" -o /dev/null -m 8 --max-redirs 0 -w '%{http_code}' "$url" 2>/dev/null || echo '000')
+  location=$(awk 'BEGIN{IGNORECASE=1} /^Location:/ {sub(/\r$/, "", $2); print $2; exit}' "$headers" 2>/dev/null || true)
+  rm -f "$headers"
+  printf '%s|%s\n' "$code" "$location"
+}
+
+cmd_doctor() {
+  local failures=0 warnings=0
+  local green='OK'
+  local yellow='WARN'
+  local red='FAIL'
+
+  report_ok() { printf '[%s] %s\n' "$green" "$1"; }
+  report_warn() { printf '[%s] %s\n' "$yellow" "$1"; warnings=$((warnings+1)); }
+  report_fail() { printf '[%s] %s\n' "$red" "$1"; failures=$((failures+1)); }
+
+  echo 'BlobeVM Manager Doctor'
+  echo '======================'
+
+  [[ -d "$STATE_DIR" ]] && report_ok "state dir present: $STATE_DIR" || report_fail "state dir missing: $STATE_DIR"
+  [[ -f "$ENV_FILE" ]] && report_ok "env file present: $ENV_FILE" || report_warn "env file missing: $ENV_FILE"
+
+  if command -v docker >/dev/null 2>&1; then
+    report_ok "docker CLI found: $(command -v docker)"
+    if docker info >/dev/null 2>&1; then
+      report_ok 'docker daemon reachable'
+    else
+      report_fail 'docker daemon not reachable (is Docker running?)'
+    fi
+  else
+    report_fail 'docker CLI not found'
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    report_ok 'jq found'
+  else
+    report_warn 'jq not found (metadata operations may fail)'
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    report_ok 'curl found'
+  else
+    report_warn 'curl not found (HTTP health checks unavailable)'
+  fi
+
+  if docker image inspect "${BLOBEVM_IMAGE:-blobevm:latest}" >/dev/null 2>&1; then
+    report_ok "image present: ${BLOBEVM_IMAGE:-blobevm:latest}"
+  else
+    report_warn "image missing: ${BLOBEVM_IMAGE:-blobevm:latest}"
+  fi
+
+  if [[ -x /usr/local/bin/blobe-vm-manager ]]; then
+    report_ok 'manager binary installed at /usr/local/bin/blobe-vm-manager'
+  else
+    report_warn 'manager binary missing at /usr/local/bin/blobe-vm-manager'
+  fi
+
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    report_ok 'mode: direct (no Traefik)'
+  else
+    report_ok "mode: Traefik/proxy (network: ${TRAEFIK_NETWORK:-proxy})"
+    if docker network inspect "${TRAEFIK_NETWORK:-proxy}" >/dev/null 2>&1; then
+      report_ok "proxy network exists: ${TRAEFIK_NETWORK:-proxy}"
+    else
+      report_fail "proxy network missing: ${TRAEFIK_NETWORK:-proxy}"
+    fi
+    if docker ps --format '{{.Names}}' | grep -Eq '^(traefik|traefik-traefik-1)$'; then
+      report_ok 'Traefik container running'
+    else
+      report_warn 'Traefik container not detected'
+    fi
+  fi
+
+  if docker ps --format '{{.Names}}' | grep -qx 'blobedash'; then
+    report_ok 'dashboard container running: blobedash'
+  elif docker ps -a --format '{{.Names}}' | grep -qx 'blobedash'; then
+    report_warn 'dashboard container exists but is not running: blobedash'
+  else
+    report_warn 'dashboard container not found: blobedash'
+  fi
+
+  local durl
+  durl="$(dashboard_url)"
+  if [[ "$durl" != "(dashboard disabled or unknown port)" ]] && command -v curl >/dev/null 2>&1; then
+    local dprobe dcode dloc
+    dprobe="$(doctor_probe_url "$durl")"
+    dcode="${dprobe%%|*}"
+    dloc="${dprobe#*|}"
+    if [[ "$dcode" =~ ^2[0-9][0-9]$ ]]; then
+      report_ok "dashboard reachable: $durl (${dcode})"
+    elif [[ "$dcode" =~ ^3[0-9][0-9]$ ]]; then
+      report_warn "dashboard redirects: $durl (${dcode} -> ${dloc:-<unknown>})"
+    else
+      report_warn "dashboard not reachable: $durl (${dcode})"
+    fi
+  else
+    report_warn 'dashboard URL unavailable'
+  fi
+
+  ensure_instance_dir
+  local instance_count=0 running_count=0
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    instance_count=$((instance_count+1))
+    local name cname url code
+    name="$(basename "$d")"
+    cname="$(container_name "$name")"
+    local vm_running=0
+    if docker ps --format '{{.Names}}' | grep -qx "$cname"; then
+      running_count=$((running_count+1))
+      vm_running=1
+      report_ok "VM running: $name"
+    elif docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+      report_ok "VM present but stopped: $name"
+    else
+      report_warn "VM metadata exists but container is missing: $name"
+    fi
+
+    if command -v curl >/dev/null 2>&1; then
+      local probe loc
+      url="$(vm_url "$name")"
+      [[ "$url" != */ ]] && url="${url}/"
+      probe="$(doctor_probe_url "$url")"
+      code="${probe%%|*}"
+      loc="${probe#*|}"
+      if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
+        report_ok "VM reachable: $name -> $url (${code})"
+      elif [[ "$code" =~ ^3[0-9][0-9]$ && "$loc" == *"/portal/login"* ]]; then
+        report_ok "VM reachable (auth required): $name -> $url (${code} -> ${loc})"
+      elif [[ "$vm_running" -eq 0 && "$code" =~ ^(000|404)$ ]]; then
+        report_ok "VM offline as expected while stopped: $name -> $url (${code})"
+      elif [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
+        report_warn "VM redirects: $name -> $url (${code} -> ${loc:-<unknown>})"
+      else
+        report_warn "VM not reachable: $name -> $url (${code})"
+      fi
+    fi
+  done
+
+  if [[ "$instance_count" -eq 0 ]]; then
+    report_warn 'no VM instances found'
+  else
+    report_ok "instances discovered: ${instance_count} (${running_count} running)"
+  fi
+
+  echo
+  echo "Summary: ${failures} failure(s), ${warnings} warning(s)"
+  if [[ "$failures" -gt 0 ]]; then
+    echo 'Doctor result: unhealthy'
+    return 1
+  fi
+  echo 'Doctor result: healthy enough'
+}
+
+cmd_delete() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker rm -f "$cname" >/dev/null || true
+  fi
+  rm -rf "$INST_DIR/$name"
+  echo "Deleted '$name'"
+}
+
+cmd_delete_all_instances() {
+  local assume_yes="${1:-}"
+  if [[ "$assume_yes" != "--yes" ]]; then
+    echo "This will remove ALL VM instances but keep Traefik and the image."
+    read -rp "Type 'DELETE' to confirm: " confirm
+    [[ "$confirm" == "DELETE" ]] || { echo "Aborted."; exit 1; }
+  fi
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local name cname
+    name="$(basename "$d")"
+    cname="$(container_name "$name")"
+    if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+      docker rm -f "$cname" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$d"
+    echo "Deleted '$name'"
+  done
+}
+
+cmd_rebuild_image() {
+  local ctx="${REPO_DIR:-/opt/blobe-vm}"
+  local image="${BLOBEVM_IMAGE:-blobevm:latest}"
+  [[ -d "$ctx" ]] || { echo "REPO_DIR not found: $ctx" >&2; exit 1; }
+  echo "Building image '$image' from $ctx ..."
+  docker build -t "$image" "$ctx"
+  echo "Pruning dangling images and build cache..."
+  docker image prune -f >/dev/null 2>&1 || true
+  docker builder prune -af >/dev/null 2>&1 || true
+}
+
+cmd_recreate_all() {
+  ensure_instance_dir
+  echo "Recreating all VM containers..."
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    recreate_container "$n"
+    echo "Recreated '$n': $(vm_url "$n")"
+  done
+}
+
+cmd_rebuild_all() {
+  cmd_rebuild_image
+  cmd_recreate_all
+}
+
+cmd_update_vm() {
+  local name="$1"; [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local cname; cname="$(container_name "$name")"
+  if ! docker ps --format '{{.Names}}' | grep -qx "$cname"; then
+    echo "Container for '$name' not running; starting..."
+    cmd_start "$name" >/dev/null
+  fi
+  echo "Updating packages inside '$name'..."
+  docker exec -u 0 "$cname" bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get -y dist-upgrade && apt-get -y autoremove && apt-get -y autoclean'
+  echo "Done."
+}
+
+_copy_app_script_into_vm() {
+  local cname="$1" app="$2"
+  local host_script="${REPO_DIR:-/opt/blobe-vm}/root/installable-apps/${app}.sh"
+  [[ -f "$host_script" ]] || { echo "App script not found: $app" >&2; return 2; }
+  docker cp "$host_script" "$cname:/tmp/app-${app}.sh"
+  docker exec -u 0 "$cname" bash -lc "chmod +x /tmp/app-${app}.sh"
+}
+
+cmd_apps() {
+  local apps_dir="${REPO_DIR:-/opt/blobe-vm}/root/installable-apps"
+  if [[ ! -d "$apps_dir" ]]; then
+    echo "No installable apps directory found at: $apps_dir"
+    return 0
+  fi
+  echo "Available apps:"
+  shopt -s nullglob
+  local found=0
+  for f in "$apps_dir"/*.sh; do
+    found=1
+    echo "- $(basename "$f" .sh)"
+  done
+  [[ "$found" -eq 1 ]] || echo "- (none)"
+}
+
+cmd_app_install() {
+  local name="$1" app="$2"
+  [[ -z "$name" || -z "$app" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local cname; cname="$(container_name "$name")"
+  if ! docker ps --format '{{.Names}}' | grep -qx "$cname"; then
+    echo "Container for '$name' not running; starting..."
+    cmd_start "$name" >/dev/null
+  fi
+  echo "Installing app '$app' in '$name'..."
+  _copy_app_script_into_vm "$cname" "$app" || { echo "No installer for '$app'" >&2; exit 1; }
+  docker exec -u 0 "$cname" bash -lc "/tmp/app-${app}.sh"
+  echo "Installed '$app' in '$name'."
+}
+
+cmd_app_status() {
+  local name="$1" app="$2"
+  [[ -z "$name" || -z "$app" ]] && usage
+  local cname; cname="$(container_name "$name")"
+  if ! docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    echo "not-installed"; return 0
+  fi
+  # crude checks per known app
+  local bin=""
+  case "$app" in
+    chrome|google-chrome|google-chrome-stable) bin="/usr/bin/google-chrome" ;;
+    firefox) bin="/usr/bin/firefox" ;;
+    vlc) bin="/usr/bin/vlc" ;;
+    vscodium|code) bin="/usr/bin/codium" ;;
+    steam) bin="/usr/games/steam" ;;
+    discord) bin="/usr/bin/discord" ;;
+    spotify|spotify-client) bin="/usr/bin/spotify" ;;
+    *) bin="" ;;
+  esac
+  if [[ -n "$bin" ]]; then
+    if docker exec "$cname" bash -lc "test -x '$bin'"; then
+      echo "installed"; else echo "missing"; fi
+  else
+    echo "unknown"; return 0
+  fi
+}
+
+# Map app name to likely apt/dpkg package names for removal
+_app_packages_for() {
+  local app="$1"
+  case "$app" in
+    chrome|google-chrome|google-chrome-stable) echo "google-chrome-stable" ;;
+    discord) echo "discord" ;;
+    vlc) echo "vlc" ;;
+    vscodium|codium|code) echo "codium" ;;
+    steam) echo "steam steam-launcher" ;;
+    minecraft|minecraft-launcher) echo "minecraft-launcher" ;;
+    synaptic) echo "synaptic" ;;
+    aqemu) echo "aqemu" ;;
+    xarchiver) echo "xarchiver" ;;
+    wine|wine64) echo "wine*" ;;
+    openjdk-17-jre) echo "openjdk-17-jre" ;;
+    openjdk-8-jre) echo "openjdk-8-jre" ;;
+    spotify|spotify-client) echo "spotify-client" ;;
+    *) echo "" ;;
+  esac
+}
+
+_app_uninstall_cleanup_script() {
+  local app="$1"
+  case "$app" in
+    chrome|google-chrome|google-chrome-stable)
+      cat <<'CLEAN'
+set -e
+rm -f /etc/apt/sources.list.d/google-chrome.list || true
+rm -f /etc/apt/keyrings/google-chrome.gpg || true
+CLEAN
+      ;;
+    vscodium|codium|code)
+      cat <<'CLEAN'
+set -e
+rm -f /etc/apt/sources.list.d/vscodium.list || true
+rm -f /usr/share/keyrings/vscodium-archive-keyring.gpg || true
+CLEAN
+      ;;
+    spotify|spotify-client)
+      cat <<'CLEAN'
+set -e
+rm -f /etc/apt/sources.list.d/spotify.list || true
+rm -f /etc/apt/keyrings/spotify.gpg || true
+CLEAN
+      ;;
+    *) : ;;
+  esac
+}
+
+cmd_app_uninstall() {
+  local name="$1" app="$2"
+  [[ -z "$name" || -z "$app" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local cname; cname="$(container_name "$name")"
+  if ! docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    echo "Container for '$name' not running; starting..."
+    cmd_start "$name" >/dev/null
+  fi
+  local pkgs; pkgs="$(_app_packages_for "$app")"
+  if [[ -z "$pkgs" ]]; then
+    echo "Unknown app: $app" >&2; exit 1
+  fi
+  echo "Uninstalling app '$app' in '$name' (packages: $pkgs)..."
+  # Build uninstall script to run inside the container as root
+  local script
+  script="$(mktemp)"
+  {
+    echo "export DEBIAN_FRONTEND=noninteractive"
+    echo "apt-get update || true"
+    echo "apt-get -y purge $pkgs || apt-get -y remove $pkgs || true"
+    _app_uninstall_cleanup_script "$app"
+    echo "apt-get -y autoremove || true"
+    echo "apt-get -y autoclean || true"
+  } >"$script"
+  docker cp "$script" "$cname:/tmp/uninstall-$app.sh"
+  docker exec -u 0 "$cname" bash -lc "chmod +x /tmp/uninstall-$app.sh && /tmp/uninstall-$app.sh" || {
+    echo "Uninstall failed for '$app'" >&2; rm -f "$script"; exit 1; }
+  rm -f "$script"
+  echo "Uninstalled '$app' from '$name'."
+}
+
+cmd_app_reinstall() {
+  local name="$1" app="$2"
+  [[ -z "$name" || -z "$app" ]] && usage
+  cmd_app_uninstall "$name" "$app" || true
+  cmd_app_install "$name" "$app"
+}
+
+cmd_recreate_targets() {
+  ensure_instance_dir
+  [[ "$#" -ge 1 ]] || { echo "Usage: $CLI_NAME recreate <name> [name2 ...]" >&2; exit 1; }
+  for n in "$@"; do
+    instance_exists "$n" || { echo "Instance '$n' not found" >&2; continue; }
+    recreate_container "$n"
+    echo "Recreated '$n': $(vm_url "$n")"
+  done
+}
+
+cmd_rebuild_vms() {
+  [[ "$#" -ge 1 ]] || { echo "Usage: $CLI_NAME rebuild-vms <name> [name2 ...]" >&2; exit 1; }
+  cmd_rebuild_image || exit $?
+  cmd_recreate_targets "$@"
+}
+
+cmd_pull_repo() {
+  local ctx="${REPO_DIR:-/opt/blobe-vm}"
+  if [[ -d "$ctx/.git" ]] && command -v git >/dev/null 2>&1; then
+    echo "Updating repo at $ctx ..."
+    git -C "$ctx" pull --rebase --autostash || git -C "$ctx" pull
+  else
+    echo "No git repository found at $ctx; skipping."
+  fi
+}
+
+cmd_update_and_rebuild() {
+  if [[ "$#" -eq 0 ]]; then
+    cmd_pull_repo
+    cmd_rebuild_all
+  else
+    local targets=("$@")
+    cmd_pull_repo
+    cmd_rebuild_image
+    cmd_recreate_targets "${targets[@]}"
+  fi
+}
+
+# --- metadata helpers ---
+meta_file() { echo "$INST_DIR/$1/instance.json"; }
+
+get_meta() {
+  local name="$1" key="$2"
+  local mf
+  mf="$(meta_file "$name")"
+  [[ -f "$mf" ]] || return 0
+  jq -r --arg k "$key" 'if has($k) then .[$k] else empty end' "$mf"
+}
+
+set_meta() {
+  local name="$1" key="$2" val="$3"
+  local mf tmp
+  mf="$(meta_file "$name")"
+  mkdir -p "$(dirname "$mf")"
+  if [[ -f "$mf" ]]; then
+    tmp="$(mktemp)"
+    jq --arg k "$key" --arg v "$val" '.[$k]=$v' "$mf" > "$tmp" && mv "$tmp" "$mf"
+  else
+    printf '{"%s":"%s"}\n' "$key" "$val" > "$mf"
+  fi
+}
+
+del_meta() {
+  local name="$1" key="$2"
+  local mf tmp
+  mf="$(meta_file "$name")"
+  [[ -f "$mf" ]] || return 0
+  tmp="$(mktemp)"
+  jq --arg k "$key" 'del(.[$k])' "$mf" > "$tmp" && mv "$tmp" "$mf"
+}
+
+recreate_container() {
+  local name="$1"
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker rm -f "$cname" >/dev/null || true
+  fi
+  # In direct mode, if stored host_port is now busy, pick a new one
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    local hp
+    hp="$(get_meta "$name" host_port || true)"
+    if [[ -z "$hp" || $(port_in_use "$hp"; echo $?) -eq 0 ]]; then
+      local np
+      np="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+      [[ -n "$np" ]] && set_meta "$name" host_port "$np"
+    fi
+  fi
+  run_container "$name"
+}
+
+cmd_rename() {
+  local old="${1:-}" new="${2:-}"
+  [[ -z "$old" || -z "$new" ]] && usage
+  require_valid_vm_name "$old"
+  require_valid_vm_name "$new"
+  [[ "$old" == "$new" ]] && { echo "Old and new names are the same." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$old" || { echo "Instance '$old' does not exist." >&2; exit 1; }
+  if instance_exists "$new"; then
+    echo "Target instance name '$new' already exists." >&2
+    exit 1
+  fi
+  # Remove old container if present
+  local oldc
+  oldc="$(container_name "$old")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$oldc"; then
+    docker rm -f "$oldc" >/dev/null || true
+  fi
+  # Move instance directory
+  mv "$INST_DIR/$old" "$INST_DIR/$new"
+  # If no explicit path override exists (path mode), URL path will change automatically
+  # Host override (domain mode) will keep using custom host if set
+  run_container "$new"
+  echo "Renamed '$old' -> '$new'"
+  echo "New URL: $(vm_url "$new")"
+}
+
+cmd_set_host() {
+  local name="${1:-}" host="${2:-}"
+  [[ -z "$name" || -z "$host" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  set_meta "$name" host_override "$host"
+  recreate_container "$name"
+  echo "Updated host for '$name' -> $(vm_url "$name")"
+}
+
+cmd_clear_host() {
+  local name="${1:-}"
+  [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  del_meta "$name" host_override || true
+  recreate_container "$name"
+  echo "Cleared host override for '$name' -> $(vm_url "$name")"
+}
+
+cmd_set_path() {
+  local name="${1:-}" prefix="${2:-}"
+  [[ -z "$name" || -z "$prefix" ]] && usage
+  [[ -z "${BLOBEVM_DOMAIN:-}" ]] || { echo "set-path is only for no-domain/path mode." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  # Normalize to leading slash, trailing slash preserved via SUBFOLDER
+  [[ "$prefix" != /* ]] && prefix="/$prefix"
+  set_meta "$name" path_override "$prefix"
+  recreate_container "$name"
+  echo "Updated path for '$name' -> $(vm_url "$name")"
+}
+
+cmd_clear_path() {
+  local name="${1:-}"
+  [[ -z "$name" ]] && usage
+  [[ -z "${BLOBEVM_DOMAIN:-}" ]] || { echo "clear-path is only for no-domain/path mode." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  del_meta "$name" path_override || true
+  recreate_container "$name"
+  echo "Cleared path override for '$name' -> $(vm_url "$name")"
+}
+
+cmd_list_ports() {
+  [[ "${NO_TRAEFIK}" -eq 1 ]] || { echo "list-ports is only available in direct mode (NO_TRAEFIK=1)." >&2; exit 1; }
+  ensure_instance_dir
+  echo "Ports:"
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local name hp
+    name="$(basename "$d")"
+    hp="$(get_meta "$name" host_port || true)"
+    echo "- ${name}: ${hp:-<unassigned>}"
+  done
+}
+
+cmd_port() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  [[ "${NO_TRAEFIK}" -eq 1 ]] || { echo "port is only available in direct mode (NO_TRAEFIK=1)." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local hp
+  hp="$(get_meta "$name" host_port || true)"
+  if [[ -z "$hp" ]]; then
+    echo "<unassigned>"; exit 0
+  fi
+  echo "$hp"
+}
+
+cmd_set_port() {
+  local name="${1:-}" port="${2:-}"
+  [[ -z "$name" || -z "$port" ]] && usage
+  [[ "${NO_TRAEFIK}" -eq 1 ]] || { echo "set-port is only available in direct mode (NO_TRAEFIK=1)." >&2; exit 1; }
+  [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || { echo "Invalid port: $port" >&2; exit 1; }
+  if port_in_use "$port"; then
+    echo "Port $port is already in use." >&2; exit 1
+  fi
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  set_meta "$name" host_port "$port"
+  recreate_container "$name"
+  echo "Port set for '$name' -> $port"
+  echo "URL: $(vm_url "$name")"
+}
+
+cmd_set_host_interactive() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  echo "Detected IP addresses:"
+  ip -o -4 addr show | awk '{print "  "$2": "$4}'
+  local pub
+  pub=$(curl -fsS ifconfig.me || true)
+  [[ -n "$pub" ]] && echo "  public: $pub"
+  echo "Enter the DNS hostname (e.g., myvm.example.com or myvm.ddns.net) that you pointed to this server:"
+  read -rp "Hostname: " host
+  [[ -z "$host" ]] && { echo "No hostname entered." >&2; exit 1; }
+  set_meta "$name" host_override "$host"
+  recreate_container "$name"
+  echo "Updated host for '$name' -> $(vm_url "$name")"
+  echo "NOTE: Ensure DNS A record resolves to this server and port 80 is reachable for HTTPS issuance if enabled."
+}
+
+cmd_set_base_path() {
+  local base="${1:-}"; [[ -z "$base" ]] && usage
+  [[ "$base" != /* ]] && base="/$base"
+  base="${base%/}"
+  BASE_PATH="$base"
+  # Update global .env
+  if [[ -f /opt/blobe-vm/.env ]]; then
+    sed -i -E "s|^BASE_PATH=.*|BASE_PATH=$BASE_PATH|" /opt/blobe-vm/.env || echo "BASE_PATH=$BASE_PATH" >> /opt/blobe-vm/.env
+  fi
+  echo "Base path set to $BASE_PATH. Recreating running containers..."
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    recreate_container "$n"
+  done
+}
+
+# --- URL helpers ---
+dashboard_url() {
+  # Always report the direct-mode dashboard URL (IP:port), regardless of Traefik mode
+  local ip port
+  ip="$(hostname -I | awk '{print $1}')"
+  port="${DASHBOARD_PORT:-}"
+  if [[ -z "$port" ]]; then
+    # Try to discover from running container mapping
+    port=$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | awk '$1=="blobedash"{print $2}' | sed -n 's/.*:\([0-9]\+\)->5000.*/\1/p' | head -n1 || true)
+  fi
+  if [[ -n "$port" ]]; then
+    echo "http://${ip}:${port}/dashboard"; return
+  fi
+  echo "(dashboard disabled or unknown port)"
+}
+
+open_browser() {
+  local url="$1"
+  if [[ -n "${BROWSER:-}" ]]; then
+    "${BROWSER}" "$url" >/dev/null 2>&1 && return 0
+  fi
+  if command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1 && return 0; fi
+  if command -v sensible-browser >/dev/null 2>&1; then sensible-browser "$url" >/dev/null 2>&1 && return 0; fi
+  if command -v gio >/dev/null 2>&1; then gio open "$url" >/dev/null 2>&1 && return 0; fi
+  return 1
+}
+
+cmd_url() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  echo "$(vm_url "$name")"
+}
+
+cmd_open() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  local url
+  url="$(vm_url "$name")"
+  echo "$url"
+  open_browser "$url" || echo "Note: couldn't auto-open a browser on this host."
+}
+
+cmd_dashboard_url() {
+  dashboard_url
+}
+
+cmd_open_dashboard() {
+  local url
+  url="$(dashboard_url)"
+  echo "$url"
+  open_browser "$url" || echo "Note: couldn't auto-open a browser on this host."
+}
+
+cmd_clear_base_path() {
+  BASE_PATH="/vm"
+  if [[ -f /opt/blobe-vm/.env ]]; then
+    sed -i -E "s|^BASE_PATH=.*|BASE_PATH=/vm|" /opt/blobe-vm/.env || echo "BASE_PATH=/vm" >> /opt/blobe-vm/.env
+  fi
+  echo "Base path reset to /vm. Recreating running containers..."
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    recreate_container "$n"
+  done
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    ""|-h|--help|help) usage 0 ;;
+    list)   cmd_list "$@" ;;
+    list-ports) cmd_list_ports "$@" ;;
+    create) cmd_create "$@" ;;
+    start)  cmd_start "$@" ;;
+    stop)   cmd_stop "$@" ;;
+    restart) cmd_restart "$@" ;;
+    status) cmd_status "$@" ;;
+    check)  cmd_check "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    delete) cmd_delete "$@" ;;
+  delete-all-instances) cmd_delete_all_instances "$@" ;;
+    rename) cmd_rename "$@" ;;
+    set-host) cmd_set_host "$@" ;;
+    clear-host) cmd_clear_host "$@" ;;
+    set-path) cmd_set_path "$@" ;;
+    clear-path) cmd_clear_path "$@" ;;
+    set-title) cmd_set_title "$@" ;;
+    set-docker) cmd_set_docker "$@" ;;
+    port)   cmd_port "$@" ;;
+    set-port) cmd_set_port "$@" ;;
+    url)    cmd_url "$@" ;;
+    open)   cmd_open "$@" ;;
+    dashboard-url) cmd_dashboard_url "$@" ;;
+    open-dashboard) cmd_open_dashboard "$@" ;;
+  rebuild-image) cmd_rebuild_image "$@" ;;
+  recreate-all) cmd_recreate_all "$@" ;;
+  recreate) cmd_recreate_targets "$@" ;;
+  rebuild-all) cmd_rebuild_all "$@" ;;
+  rebuild-vms) cmd_rebuild_vms "$@" ;;
+  pull-repo) cmd_pull_repo "$@" ;;
+  update-and-rebuild) cmd_update_and_rebuild "$@" ;;
+  update-vm) cmd_update_vm "$@" ;;
+  apps) cmd_apps "$@" ;;
+    nuke)   cmd_nuke "$@" ;;
+    set-host-interactive) cmd_set_host_interactive "$@" ;;
+    set-base-path) cmd_set_base_path "$@" ;;
+    clear-base-path) cmd_clear_base_path "$@" ;;
+  set-limits) cmd_set_limits "$@" ;;
+  clear-limits) cmd_clear_limits "$@" ;;
+  app-install) cmd_app_install "$@" ;;
+  app-status) cmd_app_status "$@" ;;
+  app-uninstall) cmd_app_uninstall "$@" ;;
+  app-reinstall) cmd_app_reinstall "$@" ;;
+    *) usage ;;
+  esac
+}
+
+cmd_nuke() {
+  local assume_yes="${1:-}"
+  if [[ "$assume_yes" != "--yes" ]]; then
+    echo "This will remove ALL BlobeVM instances, BlobeVM dashboard, Traefik stack (if deployed by BlobeVM), data, images, related volumes, and the manager binary."
+    read -rp "Type 'NUKE' to confirm: " confirm
+    if [[ "$confirm" != "NUKE" ]]; then
+      echo "Aborted."
+      exit 1
+    fi
+  fi
+
+  echo "Stopping and removing instance containers..."
+  shopt -s nullglob
+  local cname
+  for cname in $(docker ps -a --format '{{.Names}}' | grep -E '^blobevm_' || true); do
+    docker rm -f "$cname" >/dev/null 2>&1 || true
+  done
+
+  echo "Removing BlobeVM dashboard containers (blobedash, blobedash-proxy) if present..."
+  for cname in blobedash blobedash-proxy; do
+    if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+      docker rm -f "$cname" >/dev/null 2>&1 || true
+    fi
+  done
+
+  echo "Bringing down Traefik stack if deployed by BlobeVM..."
+  if [[ -f /opt/blobe-vm/traefik/docker-compose.yml ]]; then
+    (cd /opt/blobe-vm/traefik && docker compose down --remove-orphans) || true
+  fi
+
+  echo "Removing BlobeVM images (all tags under repository 'blobevm')..."
+  docker images --format '{{.Repository}}:{{.Tag}}' | awk -F: '$1=="blobevm" {print $0}' | xargs -r docker rmi -f >/dev/null 2>&1 || true
+
+  echo "Removing proxy network if empty..."
+  if docker network inspect proxy >/dev/null 2>&1; then
+    # Only remove if no containers attached
+    local attached
+    attached=$(docker network inspect proxy -f '{{ len .Containers }}') || attached=1
+    if [[ "$attached" == "0" ]]; then
+      docker network rm proxy >/dev/null 2>&1 || true
+    fi
+  fi
+
+  echo "Removing BlobeVM-related Docker volumes (best-effort)..."
+  docker volume ls --format '{{.Name}}' | grep -Ei '(blobevm|blobe-vm|blobedash|blobe)' | xargs -r docker volume rm >/dev/null 2>&1 || true
+
+  echo "Removing data directory /opt/blobe-vm ..."
+  rm -rf /opt/blobe-vm
+
+  echo "Removing manager binary /usr/local/bin/blobe-vm-manager ..."
+  rm -f /usr/local/bin/blobe-vm-manager
+
+  echo "Done. BlobeVM resources removed (no global Docker prune performed)."
+}
+
+main "$@"
