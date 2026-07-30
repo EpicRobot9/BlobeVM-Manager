@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, subprocess, shlex, base64, socket, threading, time, sqlite3, secrets
+import os, json, subprocess, shlex, base64, socket, threading, time, sqlite3, secrets, platform
 import shutil
 import re
 from urllib import request as urlrequest, error as urlerror
@@ -2352,7 +2352,7 @@ def dashboard_v2_status_public():
         return jsonify({'ok': False, 'authRequired': True, 'configured': False}), 503
     token = request.cookies.get('Dashboard-Auth')
     ok = bool(token and _verify_v2_token(token))
-    return jsonify({'ok': ok, 'authRequired': True, 'configured': True})
+    return jsonify({'ok': ok, 'authRequired': True, 'configured': True, 'username': user if ok else None})
 
 @app.post('/Dashboard/api/auth/logout')
 def dashboard_v2_logout_public():
@@ -3000,6 +3000,36 @@ def root():
 def api_list():
     return jsonify({'instances': manager_json_list()})
 
+
+@app.get('/dashboard/api/overview')
+@auth_required
+def api_overview():
+    try:
+        return jsonify({'ok': True, **_dashboard_overview_payload()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/Dashboard/api/<path:subpath>', methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'])
+def dashboard_api_case_compat(subpath):
+    """Dispatch capitalized public API paths to legacy lower-case routes.
+
+    The public deployment is mounted at /Dashboard, while older routes use
+    /dashboard. Keep both spellings functional without duplicating every
+    route decorator or changing legacy URLs.
+    """
+    from werkzeug.exceptions import NotFound
+    adapter = app.url_map.bind_to_environ(request.environ)
+    try:
+        endpoint, values = adapter.match('/dashboard/api/' + subpath, method=request.method)
+    except NotFound:
+        return jsonify({'ok': False, 'error': 'Not found'}), 404
+    view = app.view_functions.get(endpoint)
+    if view is None:
+        return jsonify({'ok': False, 'error': 'Not found'}), 404
+    return view(**values)
+
+
 @app.post('/dashboard/api/create')
 @auth_required
 def api_create():
@@ -3270,6 +3300,47 @@ def _get_system_stats():
         return stats
     except Exception:
         return {'cpu':{}, 'memory':{}, 'disk':[], 'network':{}, 'uptime':0, 'loadavg':[], 'temps':{}}
+
+
+def _read_os_release():
+    values = {}
+    try:
+        with open('/etc/os-release', encoding='utf-8') as handle:
+            for line in handle:
+                key, separator, value = line.partition('=')
+                if separator:
+                    values[key.strip()] = value.strip().strip('"')
+    except Exception:
+        pass
+    return values.get('PRETTY_NAME') or values.get('NAME') or 'Unknown OS'
+
+
+def _kernel_release():
+    try:
+        return platform.release() or 'Unknown kernel'
+    except Exception:
+        return 'Unknown kernel'
+
+
+def _dashboard_overview_payload():
+    optimizer_state = dash_optimizer.status() or {}
+    stats = optimizer_state.get('stats') or {}
+    host_stats = _get_system_stats()
+    history = (stats.get('history') or {}).get('events') or []
+    recent = optimizer_state.get('lastRun', {}).get('events') or []
+    activity = [event for event in [*history, *recent] if isinstance(event, dict)]
+    activity.sort(key=lambda event: int(event.get('ts') or 0), reverse=True)
+    return {
+        'host': {
+            'hostname': platform.node() or 'Unknown host',
+            'os': _read_os_release(),
+            'kernel': _kernel_release(),
+            'uptimeSeconds': (host_stats or {}).get('uptime', 0),
+        },
+        'stats': host_stats,
+        'instances': manager_json_list(),
+        'activity': activity[:8],
+    }
 
 
 @app.get('/Dashboard/api/stats')
