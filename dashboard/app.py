@@ -3869,6 +3869,26 @@ def api_vm_notifications(name):
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.get('/dashboard/api/notifications')
+@auth_required
+def api_notifications():
+    clear = request.args.get('clear') in ('1', 'true', 'yes', 'on')
+    items = []
+    try:
+        for instance in manager_json_list():
+            name = str(instance.get('name') or '').strip()
+            if not name:
+                continue
+            for item in dash_optimizer.get_vm_notifications(name, clear=clear):
+                enriched = dict(item)
+                enriched.setdefault('vmName', name)
+                items.append(enriched)
+        items.sort(key=lambda item: int(item.get('createdAt') or 0), reverse=True)
+        return jsonify({'ok': True, 'count': len(items), 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.post('/dashboard/api/optimizer/activity/<name>')
 @auth_required
 def api_optimizer_activity(name):
