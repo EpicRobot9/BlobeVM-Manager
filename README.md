@@ -4,7 +4,7 @@ EpicVM is a VM platform for creating, running, routing, and maintaining isolated
 
 > **License and attribution:** EpicVM is distributed under the GNU General Public License, version 3 (GPLv3). Keep the upstream DesktopOnCodespaces attribution and the repository `LICENSE` when copying or redistributing this modified work.
 
-The current repository is still hosted at [EpicRobot9/BlobeVM-Manager](https://github.com/EpicRobot9/BlobeVM-Manager). A future GitHub rename may follow; links below intentionally use the current URL.
+The current repository is still hosted at https://github.com/EpicRobot9/BlobeVM-Manager. A future GitHub rename may follow; links below intentionally use the current URL.
 
 ## Quick start
 

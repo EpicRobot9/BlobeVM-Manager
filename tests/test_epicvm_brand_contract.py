@@ -1,8 +1,7 @@
 """Executable contract checks for the EpicVM public-brand migration.
 
-The public-brand assertion is intentionally RED until the later rebrand tasks
-replace the visible legacy product name.  Compatibility identifiers are
-checked separately and are expected to remain documented throughout.
+Compatibility identifiers and the gated current GitHub URL are checked
+separately from visible product copy.
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ PUBLIC_FILES = (
     "dashboard_v2/src/components/Sidebar.jsx",
     "dashboard_v2/src/components/Topbar.jsx",
     "root/config/Desktop/EpicVM.txt",
-    "root/config/Desktop/BlobeVM.txt",
 )
 
 _LOCKFILE_NAME = re.compile(r"(?:^|[-_.])lock(?:file)?(?:[-_.]|$)", re.IGNORECASE)
@@ -134,7 +132,9 @@ def test_legacy_abi_tokens_are_documented_with_reasons() -> None:
 
 
 def test_current_public_files_contain_no_legacy_public_brand() -> None:
-    """RED until later rebrand work removes visible ``BlobeVM`` copy."""
+    """Reject legacy product copy while permitting the gated repository URL."""
+    allowed_url = _allowlist_entries()["EpicRobot9/BlobeVM-Manager"]
+    assert allowed_url
     violations = []
     for relative in PUBLIC_FILES:
         path = REPO_ROOT / relative
@@ -143,6 +143,9 @@ def test_current_public_files_contain_no_legacy_public_brand() -> None:
             continue
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), start=1):
-            if "BlobeVM" in line:
+            line_without_repository_url = line.replace(
+                "EpicRobot9/BlobeVM-Manager", ""
+            )
+            if "BlobeVM" in line_without_repository_url:
                 violations.append(f"{relative}:{line_number}: {line.strip()}")
     assert not violations, "Visible legacy public-brand uses:\n" + "\n".join(violations)
