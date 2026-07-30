@@ -849,10 +849,15 @@ cmd_doctor() {
     report_warn "image missing: ${BLOBEVM_IMAGE:-blobevm:latest}"
   fi
 
-  if [[ -x /usr/local/bin/blobe-vm-manager ]]; then
-    report_ok 'manager binary installed at /usr/local/bin/blobe-vm-manager'
+  if [[ -x /usr/local/bin/epicvm ]]; then
+    report_ok 'canonical CLI installed at /usr/local/bin/epicvm'
   else
-    report_warn 'manager binary missing at /usr/local/bin/blobe-vm-manager'
+    report_warn 'canonical CLI missing at /usr/local/bin/epicvm'
+  fi
+  if [[ -x /usr/local/bin/blobe-vm-manager ]]; then
+    report_ok 'legacy CLI compatibility launcher installed at /usr/local/bin/blobe-vm-manager'
+  else
+    report_warn 'legacy CLI compatibility launcher missing at /usr/local/bin/blobe-vm-manager'
   fi
 
   if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
@@ -1587,7 +1592,8 @@ cmd_nuke() {
   echo "Removing data directory /opt/blobe-vm ..."
   rm -rf /opt/blobe-vm
 
-  echo "Removing manager binary /usr/local/bin/blobe-vm-manager ..."
+  echo "Removing installed CLI binaries /usr/local/bin/epicvm and /usr/local/bin/blobe-vm-manager ..."
+  rm -f /usr/local/bin/epicvm
   rm -f /usr/local/bin/blobe-vm-manager
 
   echo "Done. BlobeVM resources removed (no global Docker prune performed)."

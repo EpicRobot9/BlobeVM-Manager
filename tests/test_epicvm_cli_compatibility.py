@@ -39,3 +39,21 @@ def test_legacy_launcher_execs_canonical_sibling_without_copying_implementation(
 
     assert 'exec "$SCRIPT_DIR/epicvm" "$@"' in launcher
     assert len(launcher.splitlines()) <= 12
+
+
+def test_nuke_removes_canonical_and_legacy_installed_binaries():
+    cli = CANONICAL.read_text()
+
+    nuke = cli[cli.index("cmd_nuke() {"):]
+
+    assert "rm -f /usr/local/bin/epicvm" in nuke
+    assert "rm -f /usr/local/bin/blobe-vm-manager" in nuke
+
+
+def test_doctor_checks_canonical_binary_and_reports_legacy_compatibility():
+    cli = CANONICAL.read_text()
+
+    doctor = cli[cli.index("cmd_doctor() {"):cli.index("cmd_nuke() {")]
+
+    assert "-x /usr/local/bin/epicvm" in doctor
+    assert "/usr/local/bin/epicvm" in doctor
