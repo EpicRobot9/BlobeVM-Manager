@@ -1,0 +1,7 @@
+# Legacy identifiers retained as compatibility ABI; do not remove during rebrand.
+# Format: token | reason it remains compatibility-critical
+/opt/blobe-vm | Installed application root used by existing hosts and scripts.
+blobevm_ | Prefix for existing VM/container names and runtime discovery.
+com.blobevm.managed | Existing managed-container label/identifier consumed by deployments.
+BLOBEVM_ | Legacy environment-variable namespace used by installers and operators.
+BLOBEDASH_ | Dashboard authentication/state environment-variable namespace for existing installs.
