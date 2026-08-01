@@ -191,6 +191,62 @@ def _vm_host(host_id=None):
             pass
     return VM_HOST_REGISTRY.get(host_id)
 
+
+def _vm_host_error_response(exc):
+    """Normalize provider errors without turning remote 404/409 into 500s."""
+    status = int(getattr(exc, 'status', 503) or 503)
+    status = status if 400 <= status <= 599 else 503
+    code = str(getattr(exc, 'code', 'host_unavailable') or 'host_unavailable')
+    return jsonify({'ok': False, 'error': str(exc), 'code': code}), status
+
+
+def _ensure_remote_vm_exists(host, name):
+    """Verify a selected remote host actually owns the VM being mutated.
+
+    A browser may select a host, but it is not authoritative for VM ownership.
+    When duplicate names are visible across remote hosts, fail closed instead of
+    allowing a destructive request to mutate the wrong machine.
+    """
+    if getattr(host, 'kind', 'local') != 'remote':
+        return
+    selected_id = str(getattr(host, 'host_id', '') or '')
+    selected_inventory = host.list_vms()
+    selected_has_vm = any(str(item.get('name', '')) == str(name) for item in selected_inventory)
+    registry = VM_HOST_REGISTRY
+    providers = getattr(registry, 'providers', {})
+    owners = []
+    provider_items = providers.items() if isinstance(providers, dict) else []
+    for candidate_id, candidate in provider_items:
+        candidate_id = str(candidate_id)
+        if candidate_id in {'local', selected_id} or getattr(candidate, 'kind', 'remote') != 'remote':
+            continue
+        inventories = []
+        cached_inventory = getattr(registry, 'cached_inventory', None)
+        if callable(cached_inventory):
+            try:
+                inventories.append(cached_inventory(candidate_id))
+            except Exception:
+                pass
+        try:
+            inventories.append(candidate.list_vms())
+        except Exception:
+            pass
+        if any(str(item.get('name', '')) == str(name) for inventory in inventories for item in inventory):
+            owners.append(candidate_id)
+    if owners:
+        owner_list = ', '.join(sorted(set(owners + ([selected_id] if selected_has_vm else []))))
+        raise VmHostUnavailable(
+            f"VM name is ambiguous across remote hosts: {owner_list}",
+            status=409,
+            code='ambiguous_vm_owner',
+        )
+    if not selected_has_vm:
+        raise VmHostUnavailable(
+            f"VM is not present on host {selected_id or 'remote'}",
+            status=404,
+            code='not_found',
+        )
+
 TEMPLATE = r"""
 <!doctype html><html><head><title>{{ title }}</title>
 {% if favicon_url %}<link rel="icon" href="{{ favicon_url }}" />{% endif %}
@@ -1620,7 +1676,13 @@ def manager_json_list(host_id=None):
         if host_id and host_id != 'local':
             # A remote provider owns its inventory; never fall back to the
             # dashboard server's local instance directory for an empty result.
-            return host_provider.normalize_inventory(instances)
+            normalized = host_provider.normalize_inventory(instances)
+            if hasattr(VM_HOST_REGISTRY, 'remember_inventory'):
+                try:
+                    VM_HOST_REGISTRY.remember_inventory(host_id, normalized)
+                except Exception:
+                    pass
+            return normalized
         if instances:
             # In direct mode, override URL with host:published-port (or manager port) to avoid container IPs
             if _is_direct_mode():
@@ -1651,7 +1713,23 @@ def manager_json_list(host_id=None):
                 except Exception:
                     pass
             return host_provider.normalize_inventory(instances)
+    except VmHostUnavailable:
+        # A remote host owns its inventory. Falling back to this server's
+        # instance directory would relabel local VMs as remote and can send
+        # later actions to the wrong destination.
+        if host_id and host_id != 'local':
+            cached = VM_HOST_REGISTRY.cached_inventory(host_id) if hasattr(VM_HOST_REGISTRY, 'cached_inventory') else []
+            if cached:
+                for item in cached:
+                    item['host_online'] = False
+                    item['status'] = 'offline'
+                return cached
+            raise
     except Exception:
+        # Local discovery remains best-effort for legacy deployments. A remote
+        # provider must never fall back to this server's instance directory.
+        if host_id and host_id != 'local':
+            raise
         # likely docker CLI or manager is not present -> fall back
         pass
 
@@ -3046,7 +3124,12 @@ def manager_json_fleet_list():
 @app.get('/dashboard/api/list')
 @auth_required
 def api_list():
-    return jsonify({'instances': manager_json_fleet_list()})
+    # Historical callers receive the local manager inventory exactly as
+    # before.  The modern placement-aware dashboard opts into fleet mode so
+    # legacy action URLs cannot accidentally act on a remote card as local.
+    if request.args.get('fleet', '').lower() in {'1', 'true', 'yes'}:
+        return jsonify({'instances': manager_json_fleet_list()})
+    return jsonify({'instances': manager_json_list()})
 
 
 @app.get('/dashboard/api/hosts')
@@ -3101,9 +3184,23 @@ def api_create():
     name = str(payload.get('name', '')).strip()
     if not name:
         return jsonify({'ok': False, 'error': 'No name provided'}), 400
+    requested_host_id = str(payload.get('host_id') or payload.get('host') or 'local').strip() or 'local'
+    requested_placement = str(payload.get('placement') or ('local' if requested_host_id == 'local' else 'remote')).strip().lower()
+    if requested_placement not in {'local', 'remote'}:
+        return jsonify({'ok': False, 'error': 'placement must be local or remote'}), 400
+    if (requested_placement == 'local') != (requested_host_id == 'local'):
+        return jsonify({'ok': False, 'error': 'placement and host_id do not agree'}), 400
     try:
-        host = _vm_host()
+        host = _vm_host(requested_host_id)
         if getattr(host, 'kind', 'local') == 'remote':
+            host_record = next(
+                (item for item in VM_HOST_REGISTRY.public_records() if item.get('id') == requested_host_id),
+                None,
+            )
+            if not host_record or not host_record.get('online'):
+                return jsonify({'ok': False, 'error': 'Selected VM host is offline.', 'code': 'host_offline'}), 409
+            if not (host_record.get('capabilities') or {}).get('create_vm'):
+                return jsonify({'ok': False, 'error': 'Selected VM host cannot create VMs.', 'code': 'capability_unavailable'}), 409
             spec = {
                 key: payload[key]
                 for key in ('image', 'cpu', 'memory', 'disk', 'profile')
@@ -3122,8 +3219,8 @@ def api_create():
             return jsonify({'ok': False, 'error': result.stderr.strip() or 'Error creating VM.'}), 500
         # Preserve the local manager's auto-start behavior for remote agents.
         host.run_manager('start', name, capture_output=True)
-    except VmHostUnavailable:
-        return jsonify({'ok': False, 'error': 'Selected VM host is unavailable.'}), 503
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
     except FileNotFoundError:
         return jsonify({'ok': False, 'error': 'blobe-vm-manager not found in container. Make sure it is installed and mounted.'}), 500
     except Exception as e:
@@ -3137,7 +3234,7 @@ def api_start(name):
     try:
         host = _vm_host()
     except VmHostUnavailable as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 503
+        return _vm_host_error_response(exc)
     is_remote = getattr(host, 'kind', 'local') == 'remote'
     # Safe-start: reject if already running
     if not is_remote:
@@ -3159,6 +3256,7 @@ def api_start(name):
         except Exception:
             pass
     try:
+        _ensure_remote_vm_exists(host, name)
         result = host.run_manager('start', name, capture_output=True, text=True)
         if result.returncode != 0:
             return jsonify({'ok': False, 'error': result.stderr.strip() or 'Failed to start VM'}), 500
@@ -3168,7 +3266,7 @@ def api_start(name):
             pass
         return jsonify({'ok': True})
     except VmHostUnavailable as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 503
+        return _vm_host_error_response(exc)
     except FileNotFoundError:
         return jsonify({'ok': False, 'error': 'blobe-vm-manager not found'}), 500
     except Exception as e:
@@ -3181,11 +3279,12 @@ def api_vm_status(name):
     """Return rich state for the selected local or remote VM."""
     try:
         host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
         if getattr(host, 'kind', 'local') == 'remote':
             return jsonify({'ok': True, **host.status(name), 'placement': 'remote', 'host_id': host.host_id, 'host_name': host.host_name})
         return jsonify(_vm_status_payload(name))
     except VmHostUnavailable as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 503
+        return _vm_host_error_response(exc)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -3231,10 +3330,11 @@ def api_vm_escalate(name):
 def api_stop(name):
     try:
         host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
         host.check_call('stop', name)
         return jsonify({'ok': True})
     except VmHostUnavailable as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 503
+        return _vm_host_error_response(exc)
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 500
 
@@ -3243,10 +3343,11 @@ def api_stop(name):
 def api_delete(name):
     try:
         host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
         host.check_call('delete', name)
         return jsonify({'ok': True})
     except VmHostUnavailable as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 503
+        return _vm_host_error_response(exc)
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 500
 
@@ -3473,10 +3574,11 @@ def dashboard_v2_vm_logs(name):
     # Remote agents own their VM logs; local VMs retain the Docker path.
     try:
         host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
         if getattr(host, 'kind', 'local') == 'remote':
             return jsonify({'ok': True, 'logs': host.logs(name), 'placement': 'remote', 'host_id': host.host_id})
     except VmHostUnavailable as exc:
-        return jsonify({'ok': False, 'error': str(exc), 'logs': ''}), 503
+        return jsonify({'ok': False, 'error': str(exc), 'logs': ''}), getattr(exc, 'status', 503)
     # Return last 400 lines of docker logs for the named VM container (blobevm_<name>)
     cname = f'blobevm_{name}'
     try:
@@ -3638,11 +3740,13 @@ def api_reset(name):
 @auth_required
 def api_restart(name):
     try:
-        r = _vm_host().run_manager('restart', name, capture_output=True, text=True)
+        host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
+        r = host.run_manager('restart', name, capture_output=True, text=True)
         ok = (r.returncode == 0)
         return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
     except VmHostUnavailable as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 503
+        return _vm_host_error_response(exc)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 

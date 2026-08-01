@@ -6,8 +6,8 @@ BeforeAll {
     . (Join-Path $windowsRoot 'providers/HyperVProvider.ps1')
 
     $script:vmState = @{
-        alpha = [pscustomobject]@{ Name = 'alpha'; State = 'Off'; Notes = 'EpicVM-Managed: true' }
-        manual = [pscustomobject]@{ Name = 'manual'; State = 'Off'; Notes = 'Owned by the Windows administrator' }
+        alpha = [pscustomobject]@{ Name = 'alpha'; State = 'Off'; Notes = 'EpicVM-Managed: true'; Path = 'C:\EpicVM\VMs\alpha' }
+        manual = [pscustomobject]@{ Name = 'manual'; State = 'Off'; Notes = 'Owned by the Windows administrator'; Path = 'C:\EpicVM\VMs\manual' }
     }
     $script:commandCalls = [System.Collections.Generic.List[object]]::new()
 
@@ -57,7 +57,7 @@ BeforeAll {
             }
             'New-VHD' { return [pscustomobject]@{ Path = $Parameters.Path; Size = $Parameters.SizeBytes } }
             'New-VM' {
-                $vm = [pscustomobject]@{ Name = $Parameters.Name; State = 'Off'; Notes = '' }
+                $vm = [pscustomobject]@{ Name = $Parameters.Name; State = 'Off'; Notes = ''; Path = $Parameters.Path }
                 $script:vmState[$Parameters.Name] = $vm
                 return $vm
             }
@@ -99,6 +99,11 @@ Describe 'Hyper-V provider capabilities' {
 
         $capabilities.provider | Should -Be 'HyperV'
         $capabilities.available | Should -BeTrue
+        $capabilities.create_vm | Should -BeTrue
+        $capabilities.start | Should -BeTrue
+        $capabilities.stop | Should -BeTrue
+        $capabilities.restart | Should -BeTrue
+        $capabilities.delete | Should -BeTrue
         $capabilities.features | Should -Contain 'lifecycle'
         $capabilities.resources.logicalProcessorCount | Should -Be 16
         $capabilities.resources.memoryCapacityBytes | Should -Be 68719476736
@@ -109,8 +114,8 @@ Describe 'Hyper-V provider lifecycle safety' {
     BeforeEach {
         $script:commandCalls.Clear()
         $script:vmState = @{
-            alpha = [pscustomobject]@{ Name = 'alpha'; State = 'Off'; Notes = 'EpicVM-Managed: true' }
-            manual = [pscustomobject]@{ Name = 'manual'; State = 'Off'; Notes = 'Owned by the Windows administrator' }
+            alpha = [pscustomobject]@{ Name = 'alpha'; State = 'Off'; Notes = 'EpicVM-Managed: true'; Path = 'C:\EpicVM\VMs\alpha' }
+            manual = [pscustomobject]@{ Name = 'manual'; State = 'Off'; Notes = 'Owned by the Windows administrator'; Path = 'C:\EpicVM\VMs\manual' }
         }
         $script:provider = New-TestHyperVProvider
     }
@@ -118,6 +123,7 @@ Describe 'Hyper-V provider lifecycle safety' {
     It 'starts, stops, and restarts a managed VM through the adapter' {
         (& $provider.StartVM 'alpha').state | Should -Be 'Running'
         (& $provider.StopVM 'alpha').state | Should -Be 'Off'
+        $script:vmState.alpha.State = 'Running'
         (& $provider.RestartVM 'alpha').state | Should -Be 'Running'
 
         @($script:commandCalls | ForEach-Object Name) | Should -Contain 'Start-VM'
@@ -137,5 +143,14 @@ Describe 'Hyper-V provider lifecycle safety' {
         $script:vmState.ContainsKey('alpha') | Should -BeFalse
         $removeCall = @($script:commandCalls | Where-Object Name -eq 'Remove-VM') | Select-Object -First 1
         $removeCall.Parameters.Force | Should -BeTrue
+    }
+
+    It 'refuses to delete a marked VM outside the configured EpicVM root' {
+        $script:vmState.outside = [pscustomobject]@{
+            Name = 'outside'; State = 'Off'; Notes = 'EpicVM-Managed: true'; Path = 'C:\Other\outside'
+        }
+
+        { & $provider.DeleteVM 'outside' } | Should -Throw '*managed root*'
+        @($script:commandCalls | Where-Object Name -eq 'Remove-VM') | Should -BeNullOrEmpty
     }
 }

@@ -3,7 +3,7 @@
 param(
     [string] $InstallRoot = 'C:\ProgramData\EpicVM\agent',
     [int] $Port = 8765,
-    [switch] $ShowToken
+    [string] $TailscaleAddress
 )
 
 Set-StrictMode -Version Latest
@@ -30,8 +30,19 @@ $providerPath = Join-Path $InstallRoot 'providers/HyperVProvider.ps1'
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'EpicVM.Agent.ps1') -Destination $agentPath -Force
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'providers/HyperVProvider.ps1') -Destination $providerPath -Force
 $configPath = Join-Path $InstallRoot 'config.json'
+if ([string]::IsNullOrWhiteSpace($TailscaleAddress)) {
+    $tailscaleAddresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+        Where-Object { $_.IPAddress -match '^100\.(6[4-9]|[7-9][0-9])\.' } |
+        Select-Object -ExpandProperty IPAddress)
+    if ($tailscaleAddresses.Count -eq 1) {
+        $TailscaleAddress = [string]$tailscaleAddresses[0]
+    }
+}
+if ([string]::IsNullOrWhiteSpace($TailscaleAddress) -or $TailscaleAddress -notmatch '^100\.(6[4-9]|[7-9][0-9])\.(\d{1,3})\.(\d{1,3})$') {
+    throw 'A single Tailscale IPv4 address is required. Pass -TailscaleAddress 100.x.y.z.'
+}
 $config = [ordered]@{
-    BindAddress = '0.0.0.0'
+    BindAddress = $TailscaleAddress
     Port = $Port
     Provider = 'HyperV'
     TokenFile = $tokenPath
@@ -78,8 +89,20 @@ Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remov
 New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -RemoteAddress '100.64.0.0/10' -Profile Any | Out-Null
 Start-Service -Name $serviceName
 
+$healthUri = "http://$TailscaleAddress`:$Port/v1/health"
+$healthy = $false
+for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    try {
+        $health = Invoke-RestMethod -Uri $healthUri -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 2 -ErrorAction Stop
+        if ($health.ok -eq $true) { $healthy = $true; break }
+    }
+    catch { Start-Sleep -Seconds 1 }
+}
+if (-not $healthy) {
+    throw 'EpicVM RemoteVM agent did not pass its local health check after installation.'
+}
+
 Write-Output "EpicVM RemoteVM agent installed: $serviceName"
 Write-Output "Agent endpoint: http://<tailscale-host>:${Port}/v1/health"
 Write-Output "Token file: $tokenPath"
-if ($ShowToken) { Write-Output "Enrollment token: $token" }
-else { Write-Output 'Enrollment token is not printed. Use -ShowToken only when transferring it securely.' }
+Write-Output 'Enrollment token is stored in the protected token file and is not printed.'

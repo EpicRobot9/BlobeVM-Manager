@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Enroll and inspect EpicVM RemoteVM host records.
 
-This intentionally manages only the host registry. It never sends a token to
-the dashboard API and never prints a token unless the user explicitly reads the
-source file themselves.
+This intentionally manages only the host registry. It never sends or prints a
+bearer token. Use `token-generate --output` to create a mode-0600 token file;
+`add` consumes that file (or a protected stdin/environment source) and all
+inventory/show output remains redacted.
 """
 from __future__ import annotations
 
@@ -12,6 +13,8 @@ import ipaddress
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -19,17 +22,26 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
 def registry_path() -> Path:
-    return Path(os.environ.get("EPICVM_REMOTE_HOSTS_FILE", "/var/lib/epicvm/remote-hosts.json"))
+    return Path(
+        os.environ.get("EPICVM_REMOTE_HOSTS_FILE")
+        or os.environ.get("BLOBEVM_REMOTE_HOSTS_FILE")
+        or "/opt/blobe-vm/remote-hosts.json"
+    )
 
 
 def read_hosts(path: Path) -> list[dict]:
     if not path.exists():
         return []
+    try:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise SystemExit("remote host registry must not be group/world readable")
+    except OSError as exc:
+        raise SystemExit(f"cannot stat remote host registry: {exc}")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -58,7 +70,7 @@ def validate_url(value: str) -> None:
 def validate_record(record: dict, existing: list[dict]) -> None:
     host_id = str(record.get("id", ""))
     if not ID_RE.fullmatch(host_id):
-        raise SystemExit("host id must match [a-z0-9][a-z0-9_-]{0,62}")
+        raise SystemExit("host id must match [a-z0-9][a-z0-9._-]{0,62}")
     if not str(record.get("display_name", "")).strip():
         raise SystemExit("display name is required")
     validate_url(str(record.get("agent_url", "")))
@@ -100,14 +112,26 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def read_token_file(path: str | os.PathLike[str]) -> str:
+    token_path = Path(path).expanduser()
+    try:
+        if stat.S_IMODE(token_path.stat().st_mode) & 0o077:
+            raise SystemExit("token file must not be group/world readable")
+        return token_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SystemExit(f"cannot read token file: {exc}") from exc
+
+
 def cmd_add(args: argparse.Namespace) -> int:
     path = registry_path()
     hosts = read_hosts(path)
     token = os.environ.get("EPICVM_REMOTE_TOKEN", "")
     if args.token_file:
-        token = Path(args.token_file).read_text(encoding="utf-8").strip()
+        token = read_token_file(args.token_file)
     if args.token_stdin:
         token = sys.stdin.read().strip()
+    if not token.strip():
+        raise SystemExit("an enrollment token source is required; use token-generate or --token-file/--token-stdin")
     record = {
         "id": args.host_id,
         "display_name": args.display_name,
@@ -122,6 +146,30 @@ def cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_token_generate(args: argparse.Namespace) -> int:
+    path = Path(args.output).expanduser()
+    if path.exists() and not args.force:
+        raise SystemExit(f"token file already exists: {path} (use --force to replace)")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    token = secrets.token_urlsafe(32)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(token + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    print(json.dumps({"token_file": str(path), "token": "[REDACTED]"}, sort_keys=True))
+    return 0
+
+
 def cmd_remove(args: argparse.Namespace) -> int:
     path = registry_path()
     hosts = read_hosts(path)
@@ -131,6 +179,26 @@ def cmd_remove(args: argparse.Namespace) -> int:
     write_hosts(path, remaining)
     print(args.host_id)
     return 0
+
+
+def cmd_set_enabled(args: argparse.Namespace, enabled: bool) -> int:
+    path = registry_path()
+    hosts = read_hosts(path)
+    for record in hosts:
+        if str(record.get("id")) == args.host_id:
+            record["enabled"] = enabled
+            write_hosts(path, hosts)
+            print(json.dumps({"id": args.host_id, "enabled": enabled}, sort_keys=True))
+            return 0
+    raise SystemExit(f"host id not found: {args.host_id}")
+
+
+def cmd_enable(args: argparse.Namespace) -> int:
+    return cmd_set_enabled(args, True)
+
+
+def cmd_disable(args: argparse.Namespace) -> int:
+    return cmd_set_enabled(args, False)
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -172,9 +240,19 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--token-file")
     add.add_argument("--token-stdin", action="store_true")
     add.set_defaults(func=cmd_add)
+    token_generate = sub.add_parser("token-generate")
+    token_generate.add_argument("--output", required=True)
+    token_generate.add_argument("--force", action="store_true")
+    token_generate.set_defaults(func=cmd_token_generate)
     remove = sub.add_parser("remove")
     remove.add_argument("host_id")
     remove.set_defaults(func=cmd_remove)
+    enable = sub.add_parser("enable")
+    enable.add_argument("host_id")
+    enable.set_defaults(func=cmd_enable)
+    disable = sub.add_parser("disable")
+    disable.add_argument("host_id")
+    disable.set_defaults(func=cmd_disable)
     show = sub.add_parser("show")
     show.add_argument("host_id")
     show.set_defaults(func=cmd_show)

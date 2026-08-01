@@ -11,13 +11,17 @@ Run an elevated PowerShell 7 prompt on the Windows host:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\install.ps1 -ShowToken
+.\install.ps1 -TailscaleAddress 100.72.220.117
 ```
 
-Copy the printed token to the EpicVM server through a secure channel. The
-installer stores the real token under `C:\ProgramData\EpicVM\agent\agent.token`,
+The installer writes the enrollment credential to the protected `agent.token`
+file and never prints it. Transfer that file through an approved secure channel
+to the EpicVM server, keep it mode `0600`, and enroll it with
+`epicvm-remote-host add ... --token-file <path>`.
+It stores the real token under `C:\ProgramData\EpicVM\agent\agent.token`,
 creates the `EpicVMRemoteAgent` service, and opens TCP/8765 only for
-`100.64.0.0/10` (Tailscale's CGNAT range). Set `SwitchName` in the generated
+`100.64.0.0/10` (Tailscale's CGNAT range). The listener binds only to the
+supplied Tailscale address; wildcard binding is refused. Set `SwitchName` in the generated
 `config.json` before creating VMs if Hyper-V should attach a specific virtual
 switch.
 
@@ -35,12 +39,16 @@ The service exposes:
 - `POST /v1/vms`
 - `GET /v1/vms/{name}`
 - `GET /v1/vms/{name}/logs` (empty but explicit until guest log transport is added)
-- `POST /v1/vms/{name}/actions/start|stop|restart|delete`
+- `POST /v1/vms/{name}/start|stop|restart`
+- `DELETE /v1/vms/{name}`
+- `POST /v1/vms/{name}/actions/start|stop|restart|delete` (legacy alias)
 
-All endpoints use `Authorization: Bearer <token>`. The provider writes an
+All endpoints require the configured authorization header and return JSON. Mutation
+requests accept an `Idempotency-Key`, are serialized while the provider acts,
+and return an `X-Request-Id` header. The provider writes an
 `EpicVM-Managed: true` marker into Hyper-V VM notes and refuses lifecycle or
-delete operations on VMs without that marker. Deleting a VM unregisters it but
-preserves its VHDX for recovery.
+delete operations on VMs without that marker or outside the configured VM root.
+Deleting a VM unregisters it but preserves its VHDX for recovery.
 
 ## Uninstall
 

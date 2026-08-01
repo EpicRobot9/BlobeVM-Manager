@@ -1372,7 +1372,7 @@ deploy_dashboard_direct() {
     -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
     -v "${docker_bin}:/usr/bin/docker:ro" \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /opt/blobe-vm/dashboard/app.py:/app/app.py:ro \
+    -v /opt/blobe-vm/dashboard:/app:ro \
     -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
     -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
     -e DASH_V2_SECRET="${DASH_V2_SECRET:-}" \
@@ -1438,7 +1438,11 @@ install_manager() {
   # RemoteVM host enrollment is a separate, VM-focused helper.
   if [[ -f "$REPO_DIR/server/epicvm-remote-host" ]]; then
     install -Dm755 "$REPO_DIR/server/epicvm-remote-host" /usr/local/bin/epicvm-remote-host
-    install -d -m 700 /var/lib/epicvm
+    install -d -m 700 /opt/blobe-vm
+    if [[ ! -e /opt/blobe-vm/remote-hosts.json ]]; then
+      printf '{"version":1,"hosts":[]}\n' > /opt/blobe-vm/remote-hosts.json
+      chmod 600 /opt/blobe-vm/remote-hosts.json
+    fi
   fi
   mkdir -p /opt/blobe-vm/instances
   # Ensure dashboard app is available under /opt for both modes

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "hosts": [
+    {
+      "id": "epic-pc",
+      "display_name": "Epic PC",
+      "kind": "remote",
+      "platform": "windows",
+      "provider": "hyperv",
+      "agent_url": "http://100.64.0.10:8765",
+      "token": "[REDACTED]",
+      "enabled": true,
+      "timeout": 2.0
+    }
+  ]
+}

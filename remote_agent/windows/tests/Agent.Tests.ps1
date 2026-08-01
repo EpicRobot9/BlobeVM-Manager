@@ -3,6 +3,7 @@
 
 BeforeAll {
     $windowsRoot = Split-Path -Parent $PSScriptRoot
+    . (Join-Path $windowsRoot 'providers/HyperVProvider.ps1')
     . (Join-Path $windowsRoot 'EpicVM.Agent.ps1') -NoStart
 
     function New-TestProvider {
@@ -59,12 +60,23 @@ Describe 'EpicVM agent capabilities and routing' {
         $response.Body.error.code | Should -Be 'not_found'
     }
 
+    It 'uses the documented lifecycle routes and DELETE verb' {
+        $start = Invoke-EpicVMApiRequest -State $state -Method 'POST' -Path '/v1/vms/alpha/start' -Headers @{ Authorization = 'Bearer test-secret-token' }
+        $delete = Invoke-EpicVMApiRequest -State $state -Method 'DELETE' -Path '/v1/vms/alpha' -Headers @{ Authorization = 'Bearer test-secret-token' }
+
+        $start.StatusCode | Should -Be 200
+        $delete.StatusCode | Should -Be 200
+        $delete.Body.ok | Should -BeTrue
+    }
+
     It 'validates VM names against the public contract' {
-        foreach ($name in @('alpha', 'dev.box-01', 'a' * 63)) {
+        $longName = ('a' * 63) -join ''
+        foreach ($name in @('alpha', 'dev.box-01', $longName)) {
             Test-EpicVMName -Name $name | Should -BeTrue
         }
 
-        foreach ($name in @('', 'Aalpha', '-alpha', 'alpha/', 'a' * 64, 'alpha name')) {
+        $tooLongName = ('a' * 64) -join ''
+        foreach ($name in @('', 'Aalpha', '-alpha', 'alpha/', $tooLongName, 'alpha name')) {
             Test-EpicVMName -Name $name | Should -BeFalse
         }
     }
@@ -79,5 +91,29 @@ Describe 'EpicVM provider selection' {
 
         $config.Provider = 'OtherProvider'
         { New-EpicVMProvider -Config $config } | Should -Throw '*Unsupported provider*'
+    }
+}
+
+Describe 'EpicVM agent binding defaults' {
+    It 'does not default to an all-interface listener' {
+        (Get-EpicVMDefaultConfig).BindAddress | Should -Not -Be '0.0.0.0'
+    }
+
+    It 'bounds request bodies before JSON dispatch' {
+        $stream = [System.IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes('12345'))
+        try {
+            $result = Read-EpicVMBoundedBody -Stream $stream -MaxBytes 4
+        }
+        finally {
+            $stream.Dispose()
+        }
+        $result.TooLarge | Should -BeTrue
+    }
+
+    It 'accepts only Tailscale or loopback addresses' {
+        Test-EpicVMBindAddress -Address '100.64.12.34' | Should -BeTrue
+        Test-EpicVMBindAddress -Address '127.0.0.1' | Should -BeTrue
+        Test-EpicVMBindAddress -Address '192.168.1.20' | Should -BeFalse
+        Test-EpicVMBindAddress -Address '0.0.0.0' | Should -BeFalse
     }
 }

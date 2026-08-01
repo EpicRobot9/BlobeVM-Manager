@@ -183,7 +183,7 @@ export default function VMManager(){
     }
     try{
       const [rList, rStats, rOpt, rSettings, rHosts] = await Promise.all([
-        apiFetch('/list'),
+        apiFetch('/list?fleet=1'),
         apiFetch('/vm/stats').catch(()=>({ok:false})),
         apiFetch('/optimizer/v2/summary').catch(()=>({ok:false})),
         apiFetch('/settings').catch(()=>({ok:false})),

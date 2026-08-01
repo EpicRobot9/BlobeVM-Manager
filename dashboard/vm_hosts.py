@@ -19,6 +19,11 @@ class VmHostError(RuntimeError):
 class VmHostUnavailable(VmHostError):
     """Raised when a requested VM host cannot be used or does not exist."""
 
+    def __init__(self, message: str, *, status: int = 503, code: str = "host_unavailable"):
+        super().__init__(message)
+        self.status = int(status)
+        self.code = str(code)
+
 
 class VmHostProvider(Protocol):
     """Subprocess and inventory contract shared by VM host providers."""

@@ -25,7 +25,7 @@ if (Test-Path -LiteralPath $providerPath) {
 
 function Get-EpicVMDefaultConfig {
     return [pscustomobject]@{
-        BindAddress = '0.0.0.0'
+        BindAddress = '127.0.0.1'
         Port = 8765
         Provider = 'HyperV'
         TokenFile = 'C:\ProgramData\EpicVM\agent\agent.token'
@@ -115,6 +115,31 @@ function Test-EpicVMName {
     return [regex]::IsMatch($Name, '\A[a-z0-9][a-z0-9._-]{0,62}\z', [Text.RegularExpressions.RegexOptions]::CultureInvariant)
 }
 
+function Test-EpicVMBindAddress {
+    param([AllowNull()] [string] $Address)
+    if ([string]::IsNullOrWhiteSpace($Address) -or $Address -in @('0.0.0.0', '::', '[::]')) {
+        return $false
+    }
+    try {
+        $normalizedAddress = $Address.Trim()
+        if ($normalizedAddress.StartsWith('[') -and $normalizedAddress.EndsWith(']')) {
+            $normalizedAddress = $normalizedAddress.Substring(1, $normalizedAddress.Length - 2)
+        }
+        $ip = [System.Net.IPAddress]::Parse($normalizedAddress)
+    }
+    catch {
+        return $false
+    }
+    if ([System.Net.IPAddress]::IsLoopback($ip)) {
+        return $true
+    }
+    $bytes = $ip.GetAddressBytes()
+    return (
+        $ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+        $bytes.Length -eq 4 -and $bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127
+    )
+}
+
 function New-EpicVMAgentState {
     param(
         [Parameter(Mandatory)] [object] $Config,
@@ -126,6 +151,8 @@ function New-EpicVMAgentState {
         Token = $Token
         Provider = $Provider
         StartedAt = [DateTime]::UtcNow
+        SyncRoot = [object]::new()
+        CompletedOperations = @{}
     }
 }
 
@@ -263,8 +290,19 @@ function Invoke-EpicVMApiRequest {
             if ($Method -eq 'GET' -and $segments.Count -eq 4 -and $segments[3] -eq 'logs') {
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; logs = ''; supported = $false })
             }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -in @('start', 'stop', 'restart')) {
+                $result = Invoke-EpicVMProviderAction -Provider $State.Provider -Action $segments[3] -Name $name
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
+            }
+            # Keep the first draft's action route as a compatibility alias for
+            # already-installed clients; new clients use the documented REST
+            # lifecycle paths above and DELETE /v1/vms/{name}.
             if ($Method -eq 'POST' -and $segments.Count -eq 5 -and $segments[3] -eq 'actions') {
                 $result = Invoke-EpicVMProviderAction -Provider $State.Provider -Action $segments[4] -Name $name
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
+            }
+            if ($Method -eq 'DELETE' -and $segments.Count -eq 3) {
+                $result = Invoke-EpicVMProviderAction -Provider $State.Provider -Action 'delete' -Name $name
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
             }
         }
@@ -274,37 +312,116 @@ function Invoke-EpicVMApiRequest {
         $errorCode = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'provider_error')
         $message = [string]$_.Exception.Message
         if ($message -match 'token|authorization|secret|password') { $message = 'The provider request failed.' }
-        $status = if ($errorCode -eq 'NotFound') { 404 } elseif ($errorCode -in @('InvalidInput', 'Conflict')) { 400 } elseif ($errorCode -eq 'UnmanagedVM') { 403 } else { 502 }
+        $status = if ($errorCode -eq 'NotFound') { 404 } elseif ($errorCode -eq 'InvalidInput') { 400 } elseif ($errorCode -eq 'Conflict') { 409 } elseif ($errorCode -eq 'UnmanagedVM') { 403 } else { 502 }
         return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body (New-EpicVMApiError -Code $errorCode.ToLowerInvariant() -Message $message)
+    }
+}
+
+function Test-EpicVMMutationRequest {
+    param(
+        [Parameter(Mandatory)] [string] $Method,
+        [Parameter(Mandatory)] [string] $Path
+    )
+    if ($Method -eq 'DELETE' -and $Path -match '^/v1/vms/[^/]+$') { return $true }
+    if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
+    return $false
+}
+
+function Read-EpicVMBoundedBody {
+    param(
+        [Parameter(Mandatory)] [System.IO.Stream] $Stream,
+        [int] $MaxBytes = 1048576
+    )
+    $buffer = [byte[]]::new(8192)
+    $memory = [System.IO.MemoryStream]::new()
+    try {
+        while (($read = $Stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            if ($memory.Length + $read -gt $MaxBytes) {
+                return [pscustomobject]@{ TooLarge = $true; Body = $null }
+            }
+            $memory.Write($buffer, 0, $read)
+        }
+        return [pscustomobject]@{
+            TooLarge = $false
+            Body = [Text.Encoding]::UTF8.GetString($memory.ToArray())
+        }
+    }
+    finally {
+        $memory.Dispose()
     }
 }
 
 function Start-EpicVMAgent {
     param(
         [Parameter(Mandatory)] [object] $State,
-        [string] $Bind = '0.0.0.0',
+        [string] $Bind = '127.0.0.1',
         [int] $ListenPort = 8765
     )
     $listener = [Net.HttpListener]::new()
-    # The listener is intentionally reachable on the host's interfaces; the
-    # installer restricts TCP/8765 to the Tailscale CGNAT range in Windows Firewall.
-    $listener.Prefixes.Add("http://+:$ListenPort/")
+    if ([string]::IsNullOrWhiteSpace($Bind) -or $Bind -in @('0.0.0.0', '::', '[::]')) {
+        throw 'BindAddress must be a specific Tailscale or loopback address; wildcard binding is refused.'
+    }
+    if (-not (Test-EpicVMBindAddress -Address $Bind)) {
+        throw 'BindAddress must be a Tailscale 100.64.0.0/10 address or loopback.'
+    }
+    $prefixAddress = [string]$Bind
+    if ($prefixAddress.Contains(':') -and -not $prefixAddress.StartsWith('[')) {
+        $prefixAddress = "[$prefixAddress]"
+    }
+    $listener.Prefixes.Add("http://$prefixAddress`:$ListenPort/")
     try { $listener.Start() } catch { throw 'Unable to start the EpicVM agent listener. Run the installer as an administrator.' }
     Write-Verbose ("EpicVM remote agent listening on {0}:{1}" -f $Bind, $ListenPort)
     try {
         while ($listener.IsListening) {
             $context = $listener.GetContext()
             try {
+                $requestId = [Guid]::NewGuid().ToString('N')
+                $response = $null
                 $headers = @{}
                 foreach ($key in $context.Request.Headers.AllKeys) { $headers[$key] = $context.Request.Headers[$key] }
-                $body = $null
-                if ($context.Request.HasEntityBody) {
-                    $reader = [IO.StreamReader]::new($context.Request.InputStream, [Text.Encoding]::UTF8)
-                    try { $body = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                $normalizedPath = '/' + $context.Request.Url.AbsolutePath.Trim('/')
+                $isMutation = Test-EpicVMMutationRequest -Method $context.Request.HttpMethod -Path $normalizedPath
+                $idempotencyKey = Get-EpicVMHeader -Headers $headers -Name 'Idempotency-Key'
+                $cacheKey = if ($isMutation -and $idempotencyKey -and $idempotencyKey.Length -le 128) {
+                    '{0}|{1}|{2}' -f $context.Request.HttpMethod, $normalizedPath, $idempotencyKey
+                } else { '' }
+                if ($cacheKey -and $State.CompletedOperations.ContainsKey($cacheKey)) {
+                    $response = $State.CompletedOperations[$cacheKey]
                 }
-                $response = Invoke-EpicVMApiRequest -State $State -Method $context.Request.HttpMethod -Path $context.Request.Url.AbsolutePath -Headers $headers -Body $body
+                else {
+                    $body = $null
+                    if ($context.Request.ContentLength64 -gt 1048576) {
+                        $response = ConvertTo-EpicVMJsonResponse -StatusCode 413 -Body (New-EpicVMApiError -Code 'body_too_large' -Message 'Request body exceeds the 1 MiB limit.')
+                    }
+                    else {
+                        if ($context.Request.HasEntityBody) {
+                            $readResult = Read-EpicVMBoundedBody -Stream $context.Request.InputStream
+                            if ($readResult.TooLarge) {
+                                $response = ConvertTo-EpicVMJsonResponse -StatusCode 413 -Body (New-EpicVMApiError -Code 'body_too_large' -Message 'Request body exceeds the 1 MiB limit.')
+                            }
+                            else {
+                                $body = $readResult.Body
+                            }
+                        }
+                        if ($null -eq $response) {
+                            [System.Threading.Monitor]::Enter($State.SyncRoot)
+                            try {
+                                $response = Invoke-EpicVMApiRequest -State $State -Method $context.Request.HttpMethod -Path $context.Request.Url.AbsolutePath -Headers $headers -Body $body
+                            }
+                            finally { [System.Threading.Monitor]::Exit($State.SyncRoot) }
+                        }
+                    }
+                    if ($cacheKey -and $response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
+                        $State.CompletedOperations[$cacheKey] = $response
+                        if ($State.CompletedOperations.Count -gt 256) {
+                            $State.CompletedOperations.Remove(@($State.CompletedOperations.Keys)[0])
+                        }
+                    }
+                }
+                $response | Add-Member -MemberType NoteProperty -Name RequestId -Value $requestId -Force
                 $bytes = [Text.Encoding]::UTF8.GetBytes($response.Json)
                 $context.Response.StatusCode = $response.StatusCode
+                $context.Response.Headers['X-Request-Id'] = $requestId
                 $context.Response.ContentType = 'application/json; charset=utf-8'
                 $context.Response.ContentLength64 = $bytes.Length
                 $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
@@ -313,6 +430,7 @@ function Start-EpicVMAgent {
                 $body = (New-EpicVMApiError -Code 'internal_error' -Message 'The agent could not process the request.') | ConvertTo-Json -Depth 10 -Compress
                 $bytes = [Text.Encoding]::UTF8.GetBytes($body)
                 $context.Response.StatusCode = 500
+                $context.Response.Headers['X-Request-Id'] = $requestId
                 $context.Response.ContentType = 'application/json; charset=utf-8'
                 $context.Response.ContentLength64 = $bytes.Length
                 $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)

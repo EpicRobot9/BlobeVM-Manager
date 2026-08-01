@@ -10,8 +10,9 @@ import ipaddress
 import json
 import os
 import re
+import stat
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 try:
@@ -22,8 +23,8 @@ except ImportError:  # pragma: no cover - direct module loading
     from vm_hosts import LocalDockerHost, VmHostRegistry
 
 
-HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
-DEFAULT_REMOTE_HOSTS_FILE = "/var/lib/epicvm/remote-hosts.json"
+HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+DEFAULT_REMOTE_HOSTS_FILE = "/opt/blobe-vm/remote-hosts.json"
 
 
 class RemoteHostConfigError(ValueError):
@@ -31,7 +32,12 @@ class RemoteHostConfigError(ValueError):
 
 
 def remote_hosts_path(path: str | os.PathLike[str] | None = None) -> Path:
-    return Path(path or os.environ.get("EPICVM_REMOTE_HOSTS_FILE") or DEFAULT_REMOTE_HOSTS_FILE)
+    return Path(
+        path
+        or os.environ.get("EPICVM_REMOTE_HOSTS_FILE")
+        or os.environ.get("BLOBEVM_REMOTE_HOSTS_FILE")
+        or DEFAULT_REMOTE_HOSTS_FILE
+    )
 
 
 def _is_truthy(value: Any) -> bool:
@@ -62,10 +68,14 @@ def _validate_agent_url(value: Any) -> str:
 def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any]:
     host_id = str(raw.get("id") or "").strip().lower()
     if not HOST_ID_RE.fullmatch(host_id):
-        raise RemoteHostConfigError("host id must match [a-z0-9][a-z0-9_-]{0,62}")
+        raise RemoteHostConfigError("host id must match [a-z0-9][a-z0-9._-]{0,62}")
     token = str(raw.get("token") or "").strip()
     if not token:
         raise RemoteHostConfigError(f"remote host {host_id} is missing an agent token")
+    try:
+        timeout = max(0.5, min(float(raw.get("timeout", 2.0)), 20.0))
+    except (TypeError, ValueError) as exc:
+        raise RemoteHostConfigError(f"remote host {host_id} has an invalid timeout") from exc
     record = {
         "id": host_id,
         "display_name": str(raw.get("display_name") or raw.get("name") or host_id).strip()[:120],
@@ -74,7 +84,7 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any]:
         "agent_url": _validate_agent_url(raw.get("agent_url")),
         "token": token,
         "enabled": raw.get("enabled", True) is not False,
-        "timeout": max(0.5, min(float(raw.get("timeout", 2.0)), 20.0)),
+        "timeout": timeout,
     }
     if not record["display_name"]:
         raise RemoteHostConfigError(f"remote host {host_id} has an empty display name")
@@ -85,6 +95,12 @@ def load_remote_host_configs(path: str | os.PathLike[str] | None = None) -> list
     config_path = remote_hosts_path(path)
     if not config_path.exists():
         return []
+    try:
+        mode = stat.S_IMODE(config_path.stat().st_mode)
+    except OSError as exc:
+        raise RemoteHostConfigError(f"cannot stat remote host registry: {exc}") from exc
+    if mode & 0o077:
+        raise RemoteHostConfigError("remote host registry must not be group/world readable")
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -119,17 +135,64 @@ class ConfiguredVmHostRegistry(VmHostRegistry):
     def __init__(self, local_provider: LocalDockerHost | None = None, path: str | os.PathLike[str] | None = None):
         self.local_provider = local_provider or LocalDockerHost()
         self.path = remote_hosts_path(path)
-        self._loaded_signature: tuple[int, int] | None = None
+        self.inventory_cache_path = self.path.with_name(f"{self.path.name}.inventory.json")
+        self._inventory_cache: dict[str, list[dict[str, Any]]] = self._load_inventory_cache()
+        self._loaded_signature: tuple[int, int, int] | None = None
         self.config_error = ""
         super().__init__([self.local_provider])
         self.refresh(force=True)
 
-    def _signature(self) -> tuple[int, int] | None:
+    def _load_inventory_cache(self) -> dict[str, list[dict[str, Any]]]:
+        if not self.inventory_cache_path.exists():
+            return {}
         try:
-            stat = self.path.stat()
+            if stat.S_IMODE(self.inventory_cache_path.stat().st_mode) & 0o077:
+                return {}
+        except OSError:
+            return {}
+        try:
+            payload = json.loads(self.inventory_cache_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return {}
+            return {
+                str(host_id): [dict(item) for item in items if isinstance(item, Mapping)]
+                for host_id, items in payload.items()
+                if isinstance(items, list)
+            }
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return {}
+
+    def remember_inventory(self, host_id: str, instances: Iterable[Mapping[str, Any]]) -> None:
+        """Persist redacted VM ownership metadata for offline dashboard cards."""
+        allowed = {
+            "name", "status", "state", "url", "placement", "host_id",
+            "host_name", "provider", "host_online", "id",
+        }
+        records = [
+            {key: item[key] for key in allowed if key in item}
+            for item in instances
+            if isinstance(item, Mapping)
+        ]
+        self._inventory_cache[str(host_id)] = records
+        self.inventory_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.inventory_cache_path.with_name(f".{self.inventory_cache_path.name}.tmp")
+        temporary.write_text(json.dumps(self._inventory_cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, self.inventory_cache_path)
+
+    def cached_inventory(self, host_id: str) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._inventory_cache.get(str(host_id), [])]
+
+    def _signature(self) -> tuple[int, int, int] | None:
+        try:
+            path_stat = self.path.stat()
         except FileNotFoundError:
             return None
-        return (int(stat.st_mtime_ns), int(stat.st_size))
+        return (
+            int(path_stat.st_mtime_ns),
+            int(path_stat.st_size),
+            int(stat.S_IMODE(path_stat.st_mode)),
+        )
 
     def refresh(self, *, force: bool = False) -> None:
         signature = self._signature()

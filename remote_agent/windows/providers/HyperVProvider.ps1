@@ -139,6 +139,48 @@ function Test-EpicVMHyperVOwned {
     return $false
 }
 
+function Test-EpicVMHyperVManagedRoot {
+    param(
+        [Parameter(Mandatory)] [object] $Provider,
+        [AllowNull()] [object] $VM
+    )
+
+    $root = [string](Get-EpicVMHyperVOption -Config (Get-EpicVMHyperVValue -Object $Provider -Name 'Config') -Name 'VmRoot' -Default '')
+    if ([string]::IsNullOrWhiteSpace($root) -or $null -eq $VM) { return $false }
+    try {
+        $rootFull = [System.IO.Path]::GetFullPath($root).TrimEnd([char[]]@([char]92, [char]47))
+    }
+    catch { return $false }
+
+    $candidatePaths = @()
+    foreach ($propertyName in @('Path', 'ConfigurationLocation')) {
+        $candidate = [string](Get-EpicVMHyperVValue -Object $VM -Name $propertyName -Default '')
+        if ($candidate) { $candidatePaths += $candidate }
+    }
+    if ($candidatePaths.Count -eq 0) {
+        try {
+            $name = [string](Get-EpicVMHyperVValue -Object $VM -Name 'Name' -Default '')
+            $disks = @(Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Get-VMHardDiskDrive' -Parameters @{ VMName = $name; ErrorAction = 'Stop' })
+            foreach ($disk in $disks) {
+                $candidate = [string](Get-EpicVMHyperVValue -Object $disk -Name 'Path' -Default '')
+                if ($candidate) { $candidatePaths += $candidate }
+            }
+        }
+        catch { return $false }
+    }
+    foreach ($candidate in $candidatePaths) {
+        try {
+            $candidateFull = [System.IO.Path]::GetFullPath($candidate).TrimEnd([char[]]@([char]92, [char]47))
+            if ($candidateFull.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $candidateFull.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+        catch { }
+    }
+    return $false
+}
+
 function ConvertTo-EpicVMHyperVVMInfo {
     param([Parameter(Mandatory)] [object] $VM)
 
@@ -296,6 +338,15 @@ function Get-EpicVMHyperVCapabilities {
         available = $available
         missingCmdlets = $missing
         ownershipMarker = $script:EpicVMHyperVOwnershipMarker
+        # Emit the normalized control-plane contract as well as the human-readable
+        # feature list. The dashboard must not have to infer lifecycle support
+        # from provider-specific feature names.
+        create_vm = $available
+        start = $available
+        stop = $available
+        restart = $available
+        delete = $available
+        console = $false
         features = @('capabilities', 'list', 'create', 'lifecycle', 'delete-owned')
         resources = [ordered]@{
             logicalProcessorCount = $logicalProcessors
@@ -440,6 +491,9 @@ function Invoke-EpicVMHyperVLifecycle {
     if (-not (Test-EpicVMHyperVOwned -VM $vm)) {
         throw (New-EpicVMHyperVError -Code 'UnmanagedVM' -Message ("VM '{0}' is not owned by EpicVM and cannot be changed." -f $Name))
     }
+    if (-not (Test-EpicVMHyperVManagedRoot -Provider $Provider -VM $vm)) {
+        throw (New-EpicVMHyperVError -Code 'UnmanagedVM' -Message ("VM '{0}' is outside the EpicVM managed root and cannot be changed." -f $Name))
+    }
 
     $state = [string](Get-EpicVMHyperVValue -Object $vm -Name 'State' -Default 'Unknown')
     if ($Action -eq 'Start' -and $state -ieq 'Running') {
@@ -478,6 +532,9 @@ function Remove-EpicVMHyperVVM {
     $vm = Get-EpicVMHyperVVM -Provider $Provider -Name $Name
     if (-not (Test-EpicVMHyperVOwned -VM $vm)) {
         throw (New-EpicVMHyperVError -Code 'UnmanagedVM' -Message ("VM '{0}' is not owned by EpicVM and cannot be changed." -f $Name))
+    }
+    if (-not (Test-EpicVMHyperVManagedRoot -Provider $Provider -VM $vm)) {
+        throw (New-EpicVMHyperVError -Code 'UnmanagedVM' -Message ("VM '{0}' is outside the EpicVM managed root and cannot be changed." -f $Name))
     }
     if ([string](Get-EpicVMHyperVValue -Object $vm -Name 'State' -Default '') -ieq 'Running') {
         throw (New-EpicVMHyperVError -Code 'Conflict' -Message 'Stop the VM before deleting it.')
@@ -519,15 +576,29 @@ function New-EpicVMHyperVProvider {
         Available = ($null -ne $CommandInvoker -or $missing.Count -eq 0)
         MissingCmdlets = $missing
         CommandInvoker = $CommandInvoker
+        GetCapabilities = $null
+        GetVMs = $null
+        CreateVM = $null
+        StartVM = $null
+        StopVM = $null
+        RestartVM = $null
+        DeleteVM = $null
     }
 
-    $provider.GetCapabilities = ({ Get-EpicVMHyperVCapabilities -Provider $provider }.GetNewClosure())
-    $provider.GetVMs = ({ Get-EpicVMHyperVVMs -Provider $provider }.GetNewClosure())
-    $provider.CreateVM = ({ param($Request) New-EpicVMHyperVVM -Provider $provider -Request $Request }.GetNewClosure())
-    $provider.StartVM = ({ param($Name) Invoke-EpicVMHyperVLifecycle -Provider $provider -Name $Name -Action Start }.GetNewClosure())
-    $provider.StopVM = ({ param($Name) Invoke-EpicVMHyperVLifecycle -Provider $provider -Name $Name -Action Stop }.GetNewClosure())
-    $provider.RestartVM = ({ param($Name) Invoke-EpicVMHyperVLifecycle -Provider $provider -Name $Name -Action Restart }.GetNewClosure())
-    $provider.DeleteVM = ({ param($Name) Remove-EpicVMHyperVVM -Provider $provider -Name $Name }.GetNewClosure())
+    $getCapabilities = ${function:Get-EpicVMHyperVCapabilities}
+    $getVMs = ${function:Get-EpicVMHyperVVMs}
+    $createVM = ${function:New-EpicVMHyperVVM}
+    $startVM = ${function:Invoke-EpicVMHyperVLifecycle}
+    $stopVM = ${function:Invoke-EpicVMHyperVLifecycle}
+    $restartVM = ${function:Invoke-EpicVMHyperVLifecycle}
+    $deleteVM = ${function:Remove-EpicVMHyperVVM}
+    $provider.GetCapabilities = ({ & $getCapabilities -Provider $provider }.GetNewClosure())
+    $provider.GetVMs = ({ & $getVMs -Provider $provider }.GetNewClosure())
+    $provider.CreateVM = ({ param($Request) & $createVM -Provider $provider -Request $Request }.GetNewClosure())
+    $provider.StartVM = ({ param($Name) & $startVM -Provider $provider -Name $Name -Action Start }.GetNewClosure())
+    $provider.StopVM = ({ param($Name) & $stopVM -Provider $provider -Name $Name -Action Stop }.GetNewClosure())
+    $provider.RestartVM = ({ param($Name) & $restartVM -Provider $provider -Name $Name -Action Restart }.GetNewClosure())
+    $provider.DeleteVM = ({ param($Name) & $deleteVM -Provider $provider -Name $Name }.GetNewClosure())
 
     return $provider
 }

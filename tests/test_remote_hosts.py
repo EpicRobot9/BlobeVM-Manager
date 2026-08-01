@@ -137,3 +137,43 @@ def test_dashboard_bulk_recreate_uses_registered_provider(monkeypatch, tmp_path)
         (("recreate", "alpha"), {"capture_output": True, "text": True})
     ]
     assert subprocess_calls == []
+
+
+def test_remote_inventory_failure_does_not_fall_back_to_local(monkeypatch, tmp_path):
+    import importlib.util
+
+    dashboard_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dashboard"))
+    if dashboard_dir not in sys.path:
+        sys.path.insert(0, dashboard_dir)
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    spec = importlib.util.spec_from_file_location(
+        "remote_inventory_failure_test_app", os.path.join(dashboard_dir, "app.py")
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    class OfflineRemote:
+        kind = "remote"
+        host_id = "offline-pc"
+        host_name = "Offline PC"
+
+        def list_vms(self):
+            raise module.VmHostUnavailable("offline")
+
+        def normalize_inventory(self, instances):
+            return list(instances)
+
+    class Registry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            assert host_id == "offline-pc"
+            return OfflineRemote()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", Registry())
+
+    with pytest.raises(module.VmHostUnavailable, match="offline"):
+        module.manager_json_list("offline-pc")

@@ -79,17 +79,19 @@ Application scripts live in `root/installable-apps/*.sh` in the checkout. Existi
 
 ## RemoteVM host enrollment
 
-The optional `epicvm-remote-host` helper manages the server-side Windows/Hyper-V host registry. It writes an atomic `0600` JSON file and never includes the bearer token in `list` or `show` output:
+The optional `epicvm-remote-host` helper manages the server-side Windows/Hyper-V host registry. It writes an atomic `0600` JSON file and never includes the bearer token in command output. Generate a protected token file when needed, then pass it to `add`:
 
 ```bash
-epicvm-remote-host list
-epicvm-remote-host add win-gaming "Windows Gaming PC" http://100.64.12.34:8765 --token-stdin
+epicvm-remote-host token-generate --output /run/epicvm/agent.token
+epicvm-remote-host add win-gaming "Windows Gaming PC" http://100.64.12.34:8765 --token-file /run/epicvm/agent.token
 epicvm-remote-host probe win-gaming
+epicvm-remote-host disable win-gaming
+epicvm-remote-host enable win-gaming
 epicvm-remote-host show win-gaming
 epicvm-remote-host remove win-gaming
 ```
 
-Set `EPICVM_REMOTE_HOSTS_FILE` or pass `--registry` when the default `/var/lib/epicvm/remote-hosts.json` is not suitable. The registry accepts Tailscale `100.64.0.0/10` addresses and `*.ts.net` names by default; `EPICVM_ALLOW_NON_TAILSCALE_HOSTS=1` is a development-only escape hatch.
+Set `EPICVM_REMOTE_HOSTS_FILE` (or the compatibility alias `BLOBEVM_REMOTE_HOSTS_FILE`) or pass `--registry` when the default `/opt/blobe-vm/remote-hosts.json` is not suitable. The registry accepts Tailscale `100.64.0.0/10` addresses and `*.ts.net` names by default; `EPICVM_ALLOW_NON_TAILSCALE_HOSTS=1` is a development-only escape hatch.
 
 ## Resources and destructive operations
 
