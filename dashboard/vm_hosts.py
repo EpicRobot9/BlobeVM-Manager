@@ -21,11 +21,31 @@ class VmHostUnavailable(VmHostError):
 
 
 class VmHostProvider(Protocol):
-    """Minimal contract shared by local and future VM host providers."""
+    """Subprocess and inventory contract shared by VM host providers."""
 
     host_id: str
     host_name: str
     provider: str
+    placement: str
+
+    def command(self, *args: object) -> list[str]:
+        ...
+
+    def run_manager(
+        self, *args: object, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        ...
+
+    def check_call(self, *args: object, **kwargs: Any) -> int:
+        ...
+
+    def check_output(self, *args: object, **kwargs: Any) -> str | bytes:
+        ...
+
+    def normalize_inventory(
+        self, instances: Iterable[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        ...
 
     def list_vms(self) -> list[dict[str, Any]]:
         ...

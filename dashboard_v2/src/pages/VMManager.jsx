@@ -6,6 +6,7 @@ import VmExec from '../components/VmExec'
 import { useToasts } from '../components/ToastProvider'
 import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
+import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, remotePlacementDisabledReason } from '../lib/hostPlacement'
 
 function toneFor(status){
   const s = (status || '').toLowerCase()
@@ -45,9 +46,14 @@ function StatMeter({ label, value, tone='cpu' }){
   )
 }
 
-function VmCard({ vm, onAction, onDetails, onProfileChange, onManage, profileBusy, busyAction, refreshing }){
+function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, profileBusy, busyAction, refreshing }){
   const tone = toneFor(vm.status)
   const profile = vm._profile || vm._optimizer?.profile || 'desktop'
+  const isRemote = vm.placement === 'remote'
+  const placementLabel = isRemote ? 'RemoteVM' : 'Local VM'
+  const hostName = vm.host_name || host?.display_name || (isRemote ? vm.host_id || 'Remote host' : 'EpicVM Server')
+  const hostUnavailable = isRemote && host?.online !== true
+  const hostChipClass = hostUnavailable ? 'vm-meta-chip vm-host-chip offline' : 'vm-meta-chip vm-host-chip'
   return (
     <div className={`vm-card vm-card-${tone}`}>
       <div className="vm-card-refresh" aria-hidden="true">
@@ -58,6 +64,10 @@ function VmCard({ vm, onAction, onDetails, onProfileChange, onManage, profileBus
         <div>
           <div className="vm-card-name">{vm.name}</div>
           <div className="vm-card-url"><a href={vm.url} target="_blank" rel="noreferrer">{vm.url}</a></div>
+          <div className="vm-destination-summary">
+            <span>Destination</span>
+            <strong>{placementLabel} · {hostName}</strong>
+          </div>
           {vm._title ? <div style={{color:'var(--muted)', fontSize:13, marginTop:6}}>Tab title: {vm._title}</div> : null}
           {vm._hostOverride ? <div style={{color:'var(--muted)', fontSize:13, marginTop:4}}>Domain: {vm._hostOverride}</div> : null}
         </div>
@@ -70,6 +80,9 @@ function VmCard({ vm, onAction, onDetails, onProfileChange, onManage, profileBus
       </div>
 
       <div className="vm-card-meta">
+        <div className={`vm-meta-chip vm-placement-chip ${isRemote ? 'remote' : 'local'}`}>{placementLabel}</div>
+        <div className={hostChipClass}>Host: {hostName}</div>
+        {hostUnavailable ? <div className="vm-meta-chip vm-host-chip offline">Host offline</div> : null}
         <div className="vm-meta-chip">Port: {vm.port || '—'}</div>
         <div className="vm-meta-chip">Name: {vm.name}</div>
         <label className="vm-meta-chip" style={{ gap:8 }}>
@@ -86,11 +99,11 @@ function VmCard({ vm, onAction, onDetails, onProfileChange, onManage, profileBus
       </div>
 
       <div className="vm-card-actions">
-        <Button disabled={busyAction} onClick={()=>onAction('start', vm.name)}>Start</Button>
-        <Button disabled={busyAction} onClick={()=>onAction('stop', vm.name)}>Stop</Button>
-        <Button disabled={busyAction} onClick={()=>onAction('restart', vm.name)}>Restart</Button>
+        <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('start', vm.name)}>Start</Button>
+        <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('stop', vm.name)}>Stop</Button>
+        <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('restart', vm.name)}>Restart</Button>
         <Button disabled={busyAction} onClick={()=>onDetails(vm.name)}>Console</Button>
-        <Button disabled={busyAction} onClick={()=>onManage(vm.name)}>Manage</Button>
+        <Button disabled={busyAction || hostUnavailable} onClick={()=>onManage(vm.name)}>Manage</Button>
       </div>
     </div>
   )
@@ -102,15 +115,22 @@ export default function VMManager(){
   const [initialLoading, setInitialLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [selected, setSelected] = useState(null)
+  const [selectedVmHostId, setSelectedVmHostId] = useState('local')
+  const [selectedVmUrl, setSelectedVmUrl] = useState('')
   const [logs, setLogs] = useState('')
   const [logLoading, setLogLoading] = useState(false)
   const [announcement, setAnnouncement] = useState('')
   const [busyAction, setBusyAction] = useState('')
   const [optimizer, setOptimizer] = useState({ capacity:{}, vmStates:[], profiles:{} })
+  const [hosts, setHosts] = useState([])
+  const [placement, setPlacement] = useState('local')
+  const [selectedHostId, setSelectedHostId] = useState('')
+  const [invalidatedHostId, setInvalidatedHostId] = useState('')
   const [profileBusy, setProfileBusy] = useState('')
   const [createName, setCreateName] = useState('')
   const [createBusy, setCreateBusy] = useState(false)
   const [manageVm, setManageVm] = useState(null)
+  const [manageVmHostId, setManageVmHostId] = useState('local')
   const [manageDraft, setManageDraft] = useState({ title:'', hostOverride:'', faviconUrl:'', accessMode:'public', assignedUsers:[] })
   const [manageBusy, setManageBusy] = useState(false)
   const [faviconFile, setFaviconFile] = useState(null)
@@ -162,17 +182,20 @@ export default function VMManager(){
       setInitialLoading(true)
     }
     try{
-      const [rList, rStats, rOpt, rSettings] = await Promise.all([
+      const [rList, rStats, rOpt, rSettings, rHosts] = await Promise.all([
         apiFetch('/list'),
         apiFetch('/vm/stats').catch(()=>({ok:false})),
         apiFetch('/optimizer/v2/summary').catch(()=>({ok:false})),
-        apiFetch('/settings').catch(()=>({ok:false}))
+        apiFetch('/settings').catch(()=>({ok:false})),
+        apiFetch('/hosts').catch(()=>({ok:false}))
       ])
       const j = await rList.json().catch(()=>({instances:[]}))
       const statJ = rStats && rStats.ok ? await rStats.json().catch(()=>({vms:{}})) : (rStats && typeof rStats.json === 'function' ? await rStats.json().catch(()=>({vms:{}})) : {vms:{}})
       const optJ = rOpt && typeof rOpt.json === 'function' ? await rOpt.json().catch(()=>({ok:false})) : {ok:false}
       const settingsJ = rSettings && typeof rSettings.json === 'function' ? await rSettings.json().catch(()=>({})) : {}
+      const hostsJ = rHosts && rHosts.ok !== false && typeof rHosts.json === 'function' ? await rHosts.json().catch(()=>null) : null
       if(!mountedRef.current || requestSequence !== loadSequenceRef.current) return
+      if(hostsJ !== null) setHosts(normalizeHostInventory(hostsJ))
       const statsMap = (statJ && statJ.vms) ? statJ.vms : {}
       const optimizerVmMap = Object.fromEntries(((optJ && optJ.vmStates) || []).map(v => [v.name, v]))
       const profileMap = (optJ && optJ.profiles) || {}
@@ -328,9 +351,11 @@ export default function VMManager(){
   async function action(cmd, name, opts = {}){
     const key = `${cmd}:${name}`
     const force = !!opts.force
+    const hostId = opts.hostId || 'local'
+    const isRemote = hostId !== 'local'
     setBusyAction(key)
     try{
-      if(cmd === 'start'){
+      if(cmd === 'start' && !isRemote){
         await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source: force ? 'force-start-click' : 'start-click' }) }).catch(()=>null)
         const admRes = await apiFetch(`/optimizer/admission/${encodeURIComponent(name)}${force ? '?force=1' : ''}`).catch(()=>null)
         const admBody = admRes && typeof admRes.json === 'function' ? await admRes.json().catch(()=>null) : null
@@ -343,8 +368,12 @@ export default function VMManager(){
           throw new Error(admBody.admission.reason || 'Start blocked by optimizer admission control')
         }
       }
-      const startBody = cmd === 'start' && force ? new URLSearchParams({ force:'1' }) : undefined
-      const res = await apiFetch(`/${cmd}/${encodeURIComponent(name)}`, {
+      const actionParams = new URLSearchParams()
+      if(cmd === 'start' && force) actionParams.set('force', '1')
+      if(hostId) actionParams.set('host_id', hostId)
+      const actionQuery = actionParams.toString() ? `?${actionParams.toString()}` : ''
+      const startBody = cmd === 'start' && (force || isRemote) ? actionParams : undefined
+      const res = await apiFetch(`/${cmd}/${encodeURIComponent(name)}${startBody ? '' : actionQuery}`, {
         method:'POST',
         headers: startBody ? {'Content-Type':'application/x-www-form-urlencoded'} : undefined,
         body: startBody
@@ -366,9 +395,14 @@ export default function VMManager(){
     e?.preventDefault?.()
     const name = createName.trim().toLowerCase()
     if(!name) return
+    const placementReason = placement === 'remote' && !canUseRemotePlacement(hosts)
+      ? remotePlacementDisabledReason(hosts)
+      : getPlacementValidationReason({ placement, hostId: selectedHostId, hosts })
+    if(placementReason) return
+    const payload = createPlacementPayload({ name, placement, hostId: selectedHostId })
     setCreateBusy(true)
     try{
-      const body = new URLSearchParams({ name })
+      const body = new URLSearchParams(payload)
       const res = await apiFetch('/create', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body })
       const j = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || j.ok === false) throw new Error(j.error || `Failed to create ${name}`)
@@ -400,15 +434,17 @@ export default function VMManager(){
     setProfileBusy('')
   }
 
-  async function openDetails(name){
+  async function openDetails(name, hostId = 'local', vmUrl = ''){
     logSelectionTrackerRef.current.select(name)
     logRequestSequenceRef.current += 1
     setSelected(name)
+    setSelectedVmHostId(hostId || 'local')
+    setSelectedVmUrl(vmUrl || '')
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
-    await fetchLogs(name)
+    await fetchLogs(name, hostId)
   }
 
-  async function fetchLogs(name){
+  async function fetchLogs(name, hostId = selectedVmHostId){
     if(!logSelectionTrackerRef.current.isSelected(name)) return Promise.resolve()
     const selectionGeneration = logSelectionTrackerRef.current.selectionGeneration
     const existing = logSelectionTrackerRef.current.get(name)
@@ -417,7 +453,8 @@ export default function VMManager(){
     setLogLoading(true)
     const request = logSelectionTrackerRef.current.run(name, async()=>{
       try{
-        const r = await apiFetch(`/vm/logs/${encodeURIComponent(name)}`)
+        const query = hostId && hostId !== 'local' ? `?host_id=${encodeURIComponent(hostId)}` : ''
+        const r = await apiFetch(`/vm/logs/${encodeURIComponent(name)}${query}`)
         const j = await r.json().catch(()=>({ok:false, logs:''}))
         if(requestSequence !== logRequestSequenceRef.current || !logSelectionTrackerRef.current.isCurrent(name, selectionGeneration)) return
         setLogs(j.logs || j.logs === '' ? (j.logs || '') : (j.error || ''))
@@ -430,10 +467,11 @@ export default function VMManager(){
     return request
   }
 
-  async function openManage(name){
+  async function openManage(name, hostId = 'local'){
     const requestSequence = ++manageRequestSequenceRef.current
     const requestGeneration = vmSettingsGenerationRef.current
     setManageVm(name)
+    setManageVmHostId(hostId || 'local')
     setManageBusy(true)
     setFaviconFile(null)
     try{
@@ -491,12 +529,13 @@ export default function VMManager(){
     if(mountedRef.current) setManageBusy(false)
   }
 
-  async function deleteVm(name){
+  async function deleteVm(name, hostId = manageVmHostId){
     const confirmed = window.prompt(`Delete ${name}? This removes the VM. Type DELETE to confirm.`)
     if(confirmed !== 'DELETE') return
     setBusyAction(`delete:${name}`)
     try{
-      const res = await apiFetch(`/delete/${encodeURIComponent(name)}`, { method:'POST' })
+      const query = hostId && hostId !== 'local' ? `?host_id=${encodeURIComponent(hostId)}` : ''
+      const res = await apiFetch(`/delete/${encodeURIComponent(name)}${query}`, { method:'POST' })
       const j = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || j.ok === false) throw new Error(j.error || `Failed to delete ${name}`)
       addToast({ title:name, message:'VM deleted', type:'success', timeout:5000 })
@@ -551,6 +590,53 @@ export default function VMManager(){
     return { total, live, down, busy }
   }, [instances])
 
+  const eligibleRemoteHosts = useMemo(() => getEligibleRemoteHosts(hosts), [hosts])
+  const remotePlacementAvailable = canUseRemotePlacement(hosts)
+  const hostsById = useMemo(() => Object.fromEntries(hosts.map(host => [host.id, host])), [hosts])
+  const selectedRemoteHost = eligibleRemoteHosts.find(host => host.id === selectedHostId)
+  const placementReason = placement !== 'remote'
+    ? ''
+    : invalidatedHostId && !selectedHostId
+      ? 'Selected remote host is no longer available'
+      : !remotePlacementAvailable
+        ? remotePlacementDisabledReason(hosts)
+        : getPlacementValidationReason({ placement, hostId: selectedHostId, hosts })
+  const destinationSummary = placement === 'remote'
+    ? selectedRemoteHost
+      ? `This RemoteVM will be created on ${selectedRemoteHost.display_name} over Tailscale.`
+      : 'Select an eligible remote host to continue.'
+    : 'This VM will be created locally on EpicVM Server.'
+
+  useEffect(()=>{
+    if(placement !== 'remote'){
+      if(selectedHostId) setSelectedHostId('')
+      if(invalidatedHostId) setInvalidatedHostId('')
+      return
+    }
+    const eligibleIds = new Set(eligibleRemoteHosts.map(host => host.id))
+    if(selectedHostId && !eligibleIds.has(selectedHostId)){
+      setInvalidatedHostId(selectedHostId)
+      setSelectedHostId('')
+      return
+    }
+    if(invalidatedHostId && eligibleIds.has(invalidatedHostId) && !selectedHostId){
+      setSelectedHostId(invalidatedHostId)
+      setInvalidatedHostId('')
+    }
+  }, [eligibleRemoteHosts, invalidatedHostId, placement, selectedHostId])
+
+  function choosePlacement(nextPlacement){
+    setPlacement(nextPlacement)
+    setInvalidatedHostId('')
+    if(nextPlacement === 'remote') setSelectedHostId(eligibleRemoteHosts[0]?.id || '')
+    else setSelectedHostId('')
+  }
+
+  function chooseRemoteHost(nextHostId){
+    setSelectedHostId(nextHostId)
+    setInvalidatedHostId('')
+  }
+
   return (
     <div>
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
@@ -582,9 +668,36 @@ export default function VMManager(){
           <Button onClick={()=>load({ silent:true })}>Refresh</Button>
         </div>
 
-        <form onSubmit={createVm} style={{display:'flex', gap:10, flexWrap:'wrap', marginTop:18, alignItems:'center'}}>
-          <input value={createName} onChange={e=>setCreateName(e.target.value)} placeholder="new vm name (e.g. alpha)" pattern="[a-z0-9][a-z0-9._-]{0,62}" style={{minWidth:260, background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
-          <Button type="submit" disabled={createBusy}>{createBusy ? 'Creating…' : 'Create VM'}</Button>
+        <form onSubmit={createVm} className="vm-create-form">
+          <div className="vm-create-fields">
+            <label className="vm-placement-field vm-name-field">
+              <span>VM name</span>
+              <input value={createName} onChange={e=>setCreateName(e.target.value)} placeholder="new vm name (e.g. alpha)" pattern="[a-z0-9][a-z0-9._-]{0,62}" required />
+            </label>
+            <label className="vm-placement-field">
+              <span>VM location</span>
+              <select value={placement} onChange={e=>choosePlacement(e.target.value)}>
+                <option value="local">Local VM — EpicVM Server</option>
+                <option value="remote" disabled={!remotePlacementAvailable}>Remote VM{!remotePlacementAvailable ? ' — No remote hosts connected' : ''}</option>
+              </select>
+            </label>
+            {placement === 'remote' ? (
+              <label className="vm-placement-field vm-remote-host-field">
+                <span>Remote host</span>
+                <select value={selectedHostId} onChange={e=>chooseRemoteHost(e.target.value)} disabled={!eligibleRemoteHosts.length || createBusy}>
+                  <option value="">Select an eligible host</option>
+                  {eligibleRemoteHosts.map(host => <option key={host.id} value={host.id}>{hostOptionLabel(host)}</option>)}
+                </select>
+              </label>
+            ) : null}
+            <Button type="submit" disabled={createBusy || !!placementReason}>{createBusy ? 'Creating…' : 'Create VM'}</Button>
+          </div>
+          <div className="vm-placement-summary">
+            <span>Destination</span>
+            <strong>{destinationSummary}</strong>
+          </div>
+          {!remotePlacementAvailable ? <div className="vm-placement-notice">Remote VM unavailable: No remote hosts connected.</div> : null}
+          {placementReason ? <div id="vm-placement-reason" className="vm-placement-error" role="alert">{placementReason}</div> : null}
         </form>
 
         <div style={{marginTop:18}}>
@@ -596,7 +709,10 @@ export default function VMManager(){
             <div className="vm-empty-state">No VMs found. Incredible. A VM manager with nothing to manage.</div>
           ) : (
             <div className="vm-card-grid">
-              {instances.map(vm => <VmCard key={vm.name} vm={vm} onAction={action} onDetails={openDetails} onManage={openManage} onProfileChange={setProfile} profileBusy={profileBusy === vm.name} busyAction={!!busyAction} refreshing={refreshing} />)}
+              {instances.map(vm => {
+                const hostId = vm.host_id || 'local'
+                return <VmCard key={`${hostId}:${vm.name}`} vm={vm} host={hostsById[hostId]} onAction={(cmd, name, opts={})=>action(cmd, name, { ...opts, hostId })} onDetails={(name)=>openDetails(name, hostId, vm.url)} onManage={(name)=>openManage(name, hostId)} onProfileChange={setProfile} profileBusy={profileBusy === vm.name} busyAction={!!busyAction} refreshing={refreshing} />
+              })}
             </div>
           )}
         </div>
@@ -605,10 +721,10 @@ export default function VMManager(){
       <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>setSelected(null)} width={1180}>
         <div style={{display:'flex',gap:12, flexWrap:'wrap'}}>
           <div style={{flex:'1 1 620px'}}>
-            <iframe title={`VM ${selected}`} src={`/dashboard/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:360,border:'1px solid rgba(255,255,255,0.04)', background:'#020617'}} />
-            <div style={{marginTop:12}}>
+            <iframe title={`VM ${selected}`} src={selectedVmUrl || `/dashboard/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:360,border:'1px solid rgba(255,255,255,0.04)', background:'#020617'}} />
+            {selectedVmHostId === 'local' ? <div style={{marginTop:12}}>
               <VmExec vmName={selected} />
-            </div>
+            </div> : <div className="vm-placement-notice" style={{marginTop:12}}>Remote console is served by the selected host URL.</div>}
           </div>
           <div style={{width:420,maxWidth:'100%',display:'flex',flexDirection:'column',gap:8}}>
             <div style={{fontSize:13,color:'var(--muted)'}}>Console / Logs</div>
@@ -617,7 +733,7 @@ export default function VMManager(){
             </div>
             <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
               <Button onClick={()=>fetchLogs(selected)}>Refresh Logs</Button>
-              <a href={`/dashboard/vm/${encodeURIComponent(selected)}/`} target="_blank" rel="noreferrer"><Button>Open in new tab</Button></a>
+              <a href={selectedVmUrl || `/dashboard/vm/${encodeURIComponent(selected)}/`} target="_blank" rel="noreferrer"><Button>Open in new tab</Button></a>
             </div>
           </div>
         </div>
@@ -625,7 +741,7 @@ export default function VMManager(){
 
       <Modal open={!!manageVm} title={`Manage VM: ${manageVm}`} onClose={()=>setManageVm(null)} width={760}>
         <div style={{display:'grid', gap:14}}>
-          <div style={{color:'var(--muted)'}}>Edit the custom host/domain this VM uses, the browser tab title shown in the wrapper, and optionally upload a per-VM favicon.</div>
+          <div style={{color:'var(--muted)'}}>{manageVmHostId === 'local' ? 'Edit the custom host/domain this VM uses, the browser tab title shown in the wrapper, and optionally upload a per-VM favicon.' : 'RemoteVM settings are managed on the host agent. Delete remains available here; presentation settings are local-only for now.'}</div>
           <label style={{display:'grid', gap:6}}>
             <span>Custom domain / host override</span>
             <input value={manageDraft.hostOverride || ''} onChange={e=>setManageDraft(s => ({ ...s, hostOverride: e.target.value }))} placeholder="vm42.example.com (leave blank to use default)" style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
@@ -655,8 +771,8 @@ export default function VMManager(){
             </div>
           ) : null}
           <div style={{display:'flex', gap:10, flexWrap:'wrap'}}>
-            <Button onClick={saveManageSettings} disabled={manageBusy}>{manageBusy ? 'Saving…' : 'Save VM settings'}</Button>
-            <Button onClick={()=>deleteVm(manageVm)} disabled={manageBusy} style={{background:'linear-gradient(135deg,#ef4444,#b91c1c)', color:'#fff'}}>Delete VM</Button>
+            <Button onClick={saveManageSettings} disabled={manageBusy || manageVmHostId !== 'local'}>{manageBusy ? 'Saving…' : 'Save VM settings'}</Button>
+            <Button onClick={()=>deleteVm(manageVm, manageVmHostId)} disabled={manageBusy} style={{background:'linear-gradient(135deg,#ef4444,#b91c1c)', color:'#fff'}}>Delete VM</Button>
           </div>
         </div>
       </Modal>

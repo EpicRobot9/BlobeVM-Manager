@@ -1,0 +1,17 @@
+{
+  "BindAddress": "0.0.0.0",
+  "Port": 8765,
+  "Provider": "HyperV",
+  "TokenFile": "C:\\ProgramData\\EpicVM\\agent\\agent.token",
+  "VmRoot": "C:\\ProgramData\\EpicVM\\vms",
+  "SwitchName": "",
+  "DefaultMemoryBytes": 4294967296,
+  "DefaultCpuCount": 2,
+  "DefaultDiskSizeBytes": 68719476736,
+  "MinMemoryBytes": 536870912,
+  "MaxMemoryBytes": 17179869184,
+  "MinCpuCount": 1,
+  "MaxCpuCount": 16,
+  "MaxDiskSizeBytes": 549755813888,
+  "Generation": 2
+}

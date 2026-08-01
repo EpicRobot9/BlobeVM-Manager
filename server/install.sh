@@ -1435,6 +1435,11 @@ install_manager() {
   fi
   # Keep the historical command as a compatibility launcher.
   install -Dm755 "$REPO_DIR/server/blobe-vm-manager" /usr/local/bin/blobe-vm-manager
+  # RemoteVM host enrollment is a separate, VM-focused helper.
+  if [[ -f "$REPO_DIR/server/epicvm-remote-host" ]]; then
+    install -Dm755 "$REPO_DIR/server/epicvm-remote-host" /usr/local/bin/epicvm-remote-host
+    install -d -m 700 /var/lib/epicvm
+  fi
   mkdir -p /opt/blobe-vm/instances
   # Ensure dashboard app is available under /opt for both modes
   mkdir -p /opt/blobe-vm/dashboard
@@ -1454,6 +1459,13 @@ install_manager() {
       fi
     done
     cp -f "$REPO_DIR/dashboard/app.py" /opt/blobe-vm/dashboard/app.py
+    # Keep the provider/RemoteVM imports beside the deployed app. Existing
+    # deployments often copy only app.py into /opt/blobe-vm/dashboard.
+    for dashboard_module in vm_hosts.py remote_hosts.py remote_agent_client.py; do
+      if [[ -f "$REPO_DIR/dashboard/$dashboard_module" ]]; then
+        install -Dm644 "$REPO_DIR/dashboard/$dashboard_module" "/opt/blobe-vm/dashboard/$dashboard_module"
+      fi
+    done
   fi
   # Build dashboard_v2 frontend (if present) so /Dashboard is available after install
   # dashboard_v2 build is handled by Docker Compose only

@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Enroll and inspect EpicVM RemoteVM host records.
+
+This intentionally manages only the host registry. It never sends a token to
+the dashboard API and never prints a token unless the user explicitly reads the
+source file themselves.
+"""
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
+
+
+def registry_path() -> Path:
+    return Path(os.environ.get("EPICVM_REMOTE_HOSTS_FILE", "/var/lib/epicvm/remote-hosts.json"))
+
+
+def read_hosts(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot read remote host registry: {exc}")
+    if isinstance(payload, dict):
+        payload = payload.get("hosts", [])
+    if not isinstance(payload, list):
+        raise SystemExit("remote host registry must contain a JSON array")
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def validate_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise SystemExit("agent URL must be http(s), include a hostname, and contain no credentials")
+    host = parsed.hostname
+    allowed = False
+    try:
+        allowed = ipaddress.ip_address(host) in TAILSCALE_NET
+    except ValueError:
+        allowed = host.lower().endswith(".ts.net")
+    if not allowed and os.environ.get("EPICVM_ALLOW_NON_TAILSCALE_HOSTS") not in {"1", "true", "yes"}:
+        raise SystemExit("agent URL must use a Tailscale 100.64.0.0/10 address or *.ts.net")
+
+
+def validate_record(record: dict, existing: list[dict]) -> None:
+    host_id = str(record.get("id", ""))
+    if not ID_RE.fullmatch(host_id):
+        raise SystemExit("host id must match [a-z0-9][a-z0-9_-]{0,62}")
+    if not str(record.get("display_name", "")).strip():
+        raise SystemExit("display name is required")
+    validate_url(str(record.get("agent_url", "")))
+    if not str(record.get("token", "")).strip():
+        raise SystemExit("a non-empty enrollment token is required")
+    if any(str(item.get("id")) == host_id for item in existing if str(item.get("id")) != host_id):
+        raise SystemExit(f"host id already exists: {host_id}")
+
+
+def write_hosts(path: Path, hosts: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(hosts, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def redacted(record: dict) -> dict:
+    result = dict(record)
+    result.pop("token", None)
+    result.pop("token_file", None)
+    return result
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    for record in read_hosts(registry_path()):
+        print(json.dumps(redacted(record), sort_keys=True))
+    return 0
+
+
+def cmd_add(args: argparse.Namespace) -> int:
+    path = registry_path()
+    hosts = read_hosts(path)
+    token = os.environ.get("EPICVM_REMOTE_TOKEN", "")
+    if args.token_file:
+        token = Path(args.token_file).read_text(encoding="utf-8").strip()
+    if args.token_stdin:
+        token = sys.stdin.read().strip()
+    record = {
+        "id": args.host_id,
+        "display_name": args.display_name,
+        "agent_url": args.agent_url.rstrip("/"),
+        "token": token,
+        "provider": args.provider,
+    }
+    existing = [item for item in hosts if str(item.get("id")) != args.host_id]
+    validate_record(record, hosts)
+    write_hosts(path, existing + [record])
+    print(json.dumps(redacted(record), sort_keys=True))
+    return 0
+
+
+def cmd_remove(args: argparse.Namespace) -> int:
+    path = registry_path()
+    hosts = read_hosts(path)
+    remaining = [item for item in hosts if str(item.get("id")) != args.host_id]
+    if len(remaining) == len(hosts):
+        raise SystemExit(f"host id not found: {args.host_id}")
+    write_hosts(path, remaining)
+    print(args.host_id)
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    for record in read_hosts(registry_path()):
+        if str(record.get("id")) == args.host_id:
+            print(json.dumps(redacted(record), indent=2, sort_keys=True))
+            return 0
+    raise SystemExit(f"host id not found: {args.host_id}")
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    record = next((item for item in read_hosts(registry_path()) if str(item.get("id")) == args.host_id), None)
+    if not record:
+        raise SystemExit(f"host id not found: {args.host_id}")
+    request = Request(
+        f"{str(record['agent_url']).rstrip('/')}/v1/health",
+        headers={"Authorization": f"Bearer {record['token']}", "Accept": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=3) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            print(json.dumps({"id": args.host_id, "online": True, "health": body}, sort_keys=True))
+            return 0
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+        print(json.dumps({"id": args.host_id, "online": False}, sort_keys=True))
+        return 1
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(description="Manage EpicVM RemoteVM host enrollment")
+    root.add_argument("--registry", dest="registry", help="override EPICVM_REMOTE_HOSTS_FILE")
+    sub = root.add_subparsers(dest="command", required=True)
+    sub.add_parser("list").set_defaults(func=cmd_list)
+    add = sub.add_parser("add")
+    add.add_argument("host_id")
+    add.add_argument("display_name")
+    add.add_argument("agent_url")
+    add.add_argument("--provider", default="hyperv")
+    add.add_argument("--token-file")
+    add.add_argument("--token-stdin", action="store_true")
+    add.set_defaults(func=cmd_add)
+    remove = sub.add_parser("remove")
+    remove.add_argument("host_id")
+    remove.set_defaults(func=cmd_remove)
+    show = sub.add_parser("show")
+    show.add_argument("host_id")
+    show.set_defaults(func=cmd_show)
+    probe = sub.add_parser("probe")
+    probe.add_argument("host_id")
+    probe.set_defaults(func=cmd_probe)
+    return root
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    if args.registry:
+        os.environ["EPICVM_REMOTE_HOSTS_FILE"] = args.registry
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)

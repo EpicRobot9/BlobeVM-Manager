@@ -77,6 +77,20 @@ epicvm app-reinstall <name> <app>
 
 Application scripts live in `root/installable-apps/*.sh` in the checkout. Existing deployments may use `/opt/blobe-vm/root/installable-apps/*.sh`.
 
+## RemoteVM host enrollment
+
+The optional `epicvm-remote-host` helper manages the server-side Windows/Hyper-V host registry. It writes an atomic `0600` JSON file and never includes the bearer token in `list` or `show` output:
+
+```bash
+epicvm-remote-host list
+epicvm-remote-host add win-gaming "Windows Gaming PC" http://100.64.12.34:8765 --token-stdin
+epicvm-remote-host probe win-gaming
+epicvm-remote-host show win-gaming
+epicvm-remote-host remove win-gaming
+```
+
+Set `EPICVM_REMOTE_HOSTS_FILE` or pass `--registry` when the default `/var/lib/epicvm/remote-hosts.json` is not suitable. The registry accepts Tailscale `100.64.0.0/10` addresses and `*.ts.net` names by default; `EPICVM_ALLOW_NON_TAILSCALE_HOSTS=1` is a development-only escape hatch.
+
 ## Resources and destructive operations
 
 ```bash

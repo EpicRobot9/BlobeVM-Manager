@@ -54,6 +54,30 @@ See [docs/CLI.md](docs/CLI.md) for the complete command reference and [docs/DASH
 
 The dashboard is a VM management UI served at `/dashboard` (and, for the modern UI, `/Dashboard`). It lists VM state, opens VM URLs, supports lifecycle actions, shows resource information, and exposes EpicVM optimizer controls. It does not replace the VM CLI: use `epicvm doctor` for diagnostics and `epicvm` for automation.
 
+## RemoteVM Windows hosts
+
+EpicVM can place a VM on a Windows host running Hyper-V through the RemoteVM agent. The server stores host records in a root-owned JSON file (override with `EPICVM_REMOTE_HOSTS_FILE`) and the dashboard exposes only redacted host metadata.
+
+On the Windows host, install the agent from `remote_agent/windows` in an elevated PowerShell 7 prompt:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\\install.ps1 -ShowToken
+```
+
+The installer creates the `EpicVMRemoteAgent` service, protects its bearer token, and limits the Windows Firewall rule to Tailscale's `100.64.0.0/10` range. See [remote_agent/windows/README.md](remote_agent/windows/README.md) for the API and ownership-safety rules.
+
+Enroll the host on the EpicVM server without putting the token in the JSON output:
+
+```bash
+epicvm-remote-host --registry /var/lib/epicvm/remote-hosts.json \\
+  add win-gaming "Windows Gaming PC" http://100.64.12.34:8765 --token-stdin
+printf '%s\\n' 'win-gaming is registered:'
+epicvm-remote-host --registry /var/lib/epicvm/remote-hosts.json list
+```
+
+Only Tailscale `100.64.0.0/10` addresses and `*.ts.net` names are accepted by default. The development-only `EPICVM_ALLOW_NON_TAILSCALE_HOSTS=1` override should not be used on a public server.
+
 ## Compatibility ABI
 
 EpicVM is a public rebrand, not a destructive migration. Existing deployments retain their legacy ABI so they can be upgraded in place:

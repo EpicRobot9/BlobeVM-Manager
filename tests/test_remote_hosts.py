@@ -96,3 +96,44 @@ def test_dashboard_local_inventory_uses_registered_provider(monkeypatch, tmp_pat
             "provider": "local-docker",
         }
     ]
+
+
+def test_dashboard_bulk_recreate_uses_registered_provider(monkeypatch, tmp_path):
+    import importlib.util
+
+    dashboard_dir = os.path.join(os.path.dirname(__file__), "..", "dashboard")
+    if dashboard_dir not in sys.path:
+        sys.path.insert(0, dashboard_dir)
+    spec = importlib.util.spec_from_file_location(
+        "remote_hosts_bulk_route_test_app", os.path.join(dashboard_dir, "app.py")
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_allow_insecure_dashboard", lambda: True)
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+
+    provider_calls = []
+    subprocess_calls = []
+
+    def fake_provider_run(*args, **kwargs):
+        provider_calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout="recreated\n", stderr="")
+
+    def fake_subprocess_run(argv, **kwargs):
+        subprocess_calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout="direct\n", stderr="")
+
+    monkeypatch.setattr(module.LOCAL_VM_HOST, "run_manager", fake_provider_run)
+    monkeypatch.setattr(module.subprocess, "run", fake_subprocess_run)
+
+    response = module.app.test_client().post(
+        "/dashboard/api/recreate", json={"names": ["alpha"]}
+    )
+
+    assert response.status_code == 200
+    assert provider_calls == [
+        (("recreate", "alpha"), {"capture_output": True, "text": True})
+    ]
+    assert subprocess_calls == []
