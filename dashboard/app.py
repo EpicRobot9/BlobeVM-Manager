@@ -11,6 +11,10 @@ from runtime_stats import get_docker_stats
 import hmac, hashlib, time, base64
 from branding import PRODUCT_NAME, DASHBOARD_TITLE, MANAGER_NAME, AUTH_REALM
 try:
+    from .vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
+except ImportError:
+    from vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
+try:
     import psutil
 except Exception:
     psutil = None
@@ -162,6 +166,28 @@ if not os.path.isfile(MANAGER):
 HOST_DOCKER_BIN = os.environ.get('HOST_DOCKER_BIN') or '/usr/bin/docker'
 CONTAINER_DOCKER_BIN = os.environ.get('CONTAINER_DOCKER_BIN') or '/usr/bin/docker'
 DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
+
+# The local provider is the compatibility default.  A host id may be supplied
+# by newer callers, while legacy requests that only contain a VM name remain
+# local by default.
+LOCAL_VM_HOST = LocalDockerHost(manager=MANAGER)
+VM_HOST_REGISTRY = VmHostRegistry([LOCAL_VM_HOST])
+VM_HOSTS = VM_HOST_REGISTRY
+
+def _vm_host(host_id=None):
+    if host_id is None:
+        host_id = 'local'
+        try:
+            host_id = request.values.get('host_id') or request.values.get('host') or host_id
+            if request.is_json:
+                payload = request.get_json(silent=True) or {}
+                if isinstance(payload, dict):
+                    host_id = payload.get('host_id') or payload.get('host') or host_id
+        except RuntimeError:
+            # Helpers used by background jobs have no request context.
+            pass
+    return VM_HOST_REGISTRY.get(host_id)
+
 TEMPLATE = r"""
 <!doctype html><html><head><title>{{ title }}</title>
 {% if favicon_url %}<link rel="icon" href="{{ favicon_url }}" />{% endif %}
@@ -1462,14 +1488,16 @@ def _has_flag(name: str, flag: str, max_age_sec: int = 6*3600) -> bool:
         return False
 
 def _run_manager(*args):
-    """Run the manager with given args. If the primary manager doesn't support
-    the command (prints Usage/unknown), fall back to the repo script.
-    Returns (ok: bool, stdout: str, stderr: str, returncode: int).
+    """Run the selected host manager with given args.
+
+    If the primary manager doesn't support the command (prints Usage/unknown),
+    fall back to the repo script. Returns (ok, stdout, stderr, returncode).
     """
+    host = _vm_host()
     try:
-        r = subprocess.run([MANAGER, *args], capture_output=True, text=True)
-    except FileNotFoundError:
-        r = subprocess.CompletedProcess([MANAGER, *args], 127, '', 'not found')
+        r = host.run_manager(*args, capture_output=True, text=True)
+    except VmHostUnavailable:
+        r = subprocess.CompletedProcess(host.command(*args), 127, '', 'not found')
     ok = (r.returncode == 0)
     errtxt = (r.stderr or '') + ('' if ok else ('\n' + (r.stdout or '')))
     # Heuristic: if command not recognized or prints usage, try fallback
@@ -1575,25 +1603,17 @@ def _build_vm_url(name: str) -> str:
         return f'{base}{prefix}/'
     return f'{prefix}/'
 
-def manager_json_list():
+def manager_json_list(host_id=None):
     """Return a list of instances with best-effort status and URL.
-    Tries the manager 'list' first (requires docker CLI). Falls back to scanning
-    the instances directory and asking the manager for each URL individually.
+    Tries the selected provider's manager list first. Falls back to scanning
+    the instances directory and asking the provider for each URL individually.
     """
+    host_provider = _vm_host(host_id)
     instances = []
     try:
-        # Fast path: parse manager list output
-        out = subprocess.check_output([MANAGER, 'list'], text=True)
-        lines = [l[2:] for l in out.splitlines() if l.startswith('- ')]
-        for l in lines:
-            try:
-                parts = [p.strip() for p in l.split('->')]
-                name = parts[0].split()[0]
-                status = parts[1] if len(parts) > 1 else ''
-                url = parts[2] if len(parts) > 2 else ''
-                instances.append({'name': name, 'status': status, 'url': url})
-            except Exception:
-                pass
+        # Fast path: let the provider parse its inventory while preserving the
+        # existing manager command and output format.
+        instances = host_provider.list_vms()
         if instances:
             # In direct mode, override URL with host:published-port (or manager port) to avoid container IPs
             if _is_direct_mode():
@@ -1603,7 +1623,7 @@ def manager_json_list():
                     hp = _vm_host_port(cname)
                     if not hp:
                         try:
-                            hp = subprocess.check_output([MANAGER, 'port', it['name']], text=True).strip()
+                            hp = host_provider.check_output('port', it['name'], text=True).strip()
                         except Exception:
                             hp = ''
                     # Record explicit port for frontend
@@ -1623,9 +1643,9 @@ def manager_json_list():
                         it['status'] = 'Updating...'
                 except Exception:
                     pass
-            return instances
+            return host_provider.normalize_inventory(instances)
     except Exception:
-        # likely docker CLI not present inside container -> fall back
+        # likely docker CLI or manager is not present -> fall back
         pass
 
     # Fallback: scan instance folders and resolve URL per instance
@@ -1660,7 +1680,7 @@ def manager_json_list():
             hp = _vm_host_port(cname)
             if not hp:
                 try:
-                    hp = subprocess.check_output([MANAGER, 'port', name], text=True).strip()
+                    hp = host_provider.check_output('port', name, text=True).strip()
                 except Exception:
                     hp = ''
             if hp and host:
@@ -1668,7 +1688,7 @@ def manager_json_list():
             else:
                 # Fallback to manager per-VM URL (may be container IP, but last resort)
                 try:
-                    url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
+                    url = host_provider.check_output('url', name, text=True).strip()
                 except Exception:
                     url = ''
             if hp and hp.isdigit():
@@ -1684,7 +1704,7 @@ def manager_json_list():
         if port:
             inst['port'] = port
         instances.append(inst)
-    return instances
+    return host_provider.normalize_inventory(instances)
 
 def _read_env():
     env_path = os.path.join(_state_dir(), '.env')
@@ -1835,7 +1855,7 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode
             sequence.append('recreate')
     for action in sequence:
         try:
-            proc = subprocess.run([MANAGER, action, name], capture_output=True, text=True, timeout=90)
+            proc = _vm_host().run_manager(action, name, capture_output=True, text=True, timeout=90)
             attempt = {
                 'action': action,
                 'ok': proc.returncode == 0,
@@ -2175,7 +2195,7 @@ def portal_start_vm(name):
     if not _user_can_access_vm(request.portal_user, name):
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
     try:
-        subprocess.check_call([MANAGER, 'start', name])
+        _vm_host().check_call('start', name)
         try:
             dash_optimizer.note_vm_activity(name, 'portal-start')
         except Exception:
@@ -2190,7 +2210,7 @@ def portal_stop_vm(name):
     if not _user_can_access_vm(request.portal_user, name):
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
     try:
-        subprocess.check_call([MANAGER, 'stop', name])
+        _vm_host().check_call('stop', name)
         return jsonify({'ok': True})
     except subprocess.CalledProcessError as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -3036,18 +3056,21 @@ def api_create():
     name = request.form.get('name','').strip()
     if not name:
         return jsonify({'ok': False, 'error': 'No name provided'}), 400
+    host = _vm_host()
     try:
-        result = subprocess.run([MANAGER, 'create', name], capture_output=True, text=True)
+        result = host.run_manager('create', name, capture_output=True, text=True)
         if result.returncode == 125:
             # Docker exit 125: container name conflict or similar
             msg = result.stderr.strip() or 'VM already exists or container conflict.'
             # Try to start anyway
-            subprocess.run([MANAGER, 'start', name], capture_output=True)
+            host.run_manager('start', name, capture_output=True)
             return jsonify({'ok': False, 'error': msg})
         elif result.returncode != 0:
             return jsonify({'ok': False, 'error': result.stderr.strip() or 'Error creating VM.'}), 500
         # Auto-start after creation
-        subprocess.run([MANAGER, 'start', name], capture_output=True)
+        host.run_manager('start', name, capture_output=True)
+    except VmHostUnavailable:
+        return jsonify({'ok': False, 'error': 'blobe-vm-manager not found in container. Make sure it is installed and mounted.'}), 500
     except FileNotFoundError:
         return jsonify({'ok': False, 'error': 'blobe-vm-manager not found in container. Make sure it is installed and mounted.'}), 500
     except Exception as e:
@@ -3077,7 +3100,8 @@ def api_start(name):
     except Exception:
         pass
     try:
-        result = subprocess.run([MANAGER, 'start', name], capture_output=True, text=True)
+        host = _vm_host()
+        result = host.run_manager('start', name, capture_output=True, text=True)
         if result.returncode != 0:
             return jsonify({'ok': False, 'error': result.stderr.strip() or 'Failed to start VM'}), 500
         try:
@@ -3085,6 +3109,8 @@ def api_start(name):
         except Exception:
             pass
         return jsonify({'ok': True})
+    except VmHostUnavailable:
+        return jsonify({'ok': False, 'error': 'blobe-vm-manager not found'}), 500
     except FileNotFoundError:
         return jsonify({'ok': False, 'error': 'blobe-vm-manager not found'}), 500
     except Exception as e:
@@ -3140,13 +3166,13 @@ def api_vm_escalate(name):
 @app.post('/dashboard/api/stop/<name>')
 @auth_required
 def api_stop(name):
-    subprocess.check_call([MANAGER, 'stop', name])
+    _vm_host().check_call('stop', name)
     return jsonify({'ok': True})
 
 @app.post('/dashboard/api/delete/<name>')
 @auth_required
 def api_delete(name):
-    subprocess.check_call([MANAGER, 'delete', name])
+    _vm_host().check_call('delete', name)
     return jsonify({'ok': True})
 
 
@@ -3505,19 +3531,20 @@ def api_reset(name):
     they really want to purge instance data.
     """
     try:
+        host = _vm_host()
         def worker(vm_name):
             try:
                 # Use manager delete which should remove container and instance data
-                subprocess.run([MANAGER, 'delete', vm_name], capture_output=True, text=True)
+                host.run_manager('delete', vm_name, capture_output=True, text=True)
             except Exception:
                 pass
             try:
                 # Create a fresh instance and start it
-                subprocess.run([MANAGER, 'create', vm_name], capture_output=True, text=True)
+                host.run_manager('create', vm_name, capture_output=True, text=True)
             except Exception:
                 pass
             try:
-                subprocess.run([MANAGER, 'start', vm_name], capture_output=True, text=True)
+                host.run_manager('start', vm_name, capture_output=True, text=True)
             except Exception:
                 pass
         threading.Thread(target=worker, args=(name,), daemon=True).start()
@@ -3529,7 +3556,7 @@ def api_reset(name):
 @auth_required
 def api_restart(name):
     try:
-        r = subprocess.run([MANAGER, 'restart', name], capture_output=True, text=True)
+        r = _vm_host().run_manager('restart', name, capture_output=True, text=True)
         ok = (r.returncode == 0)
         return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
     except Exception as e:
