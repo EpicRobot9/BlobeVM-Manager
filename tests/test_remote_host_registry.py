@@ -380,6 +380,8 @@ def test_remote_host_enrollment_rejects_unauthenticated_upload(monkeypatch, tmp_
     assert response.status_code == 401
     assert not module.VM_HOST_REGISTRY.path.exists()
 
+
+def test_remote_lifecycle_route_uses_selected_host(monkeypatch, tmp_path):
     monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
     monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
     import importlib
@@ -419,6 +421,24 @@ def test_remote_host_enrollment_rejects_unauthenticated_upload(monkeypatch, tmp_
     response = module.app.test_client().post("/dashboard/api/start/alpha?host_id=epic-pc")
     assert response.status_code == 200
     assert calls and calls[0][0:2] == ("start", "alpha")
+
+
+def test_remote_host_enrollment_preflight_is_same_origin_only(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.delenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", raising=False)
+    monkeypatch.setenv("BLOBEDASH_USER", "admin")
+    monkeypatch.setenv("BLOBEDASH_PASS", "password")
+    monkeypatch.setenv("DASH_V2_SECRET", "test-secret")
+    module = importlib.import_module("dashboard.app")
+    module.VM_HOST_REGISTRY.path = tmp_path / "remote-hosts.json"
+    response = module.app.test_client().options(
+        "/dashboard/api/remote-hosts/enroll",
+        headers={"Origin": "https://localhost"},
+    )
+    assert response.status_code == 204
+    assert response.headers["Access-Control-Allow-Origin"] == "https://localhost"
+    assert response.headers["Access-Control-Allow-Credentials"] == "true"
 
 
 def test_duplicate_remote_vm_names_fail_closed(monkeypatch, tmp_path):
