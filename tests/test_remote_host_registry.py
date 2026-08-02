@@ -144,6 +144,35 @@ def test_remote_agent_client_sends_token_and_parses_vm_list(monkeypatch):
     assert calls[0][1] <= 3
 
 
+def test_remote_create_uses_long_operation_timeout():
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_open(req, timeout):
+        calls.append(timeout)
+        return FakeResponse()
+
+    RemoteAgentClient(
+        "http://100.64.0.2:8765",
+        "token",
+        timeout=2.0,
+        opener=fake_open,
+    ).create("alpha")
+
+    assert calls[0] >= 120
+
+
 def test_remote_lifecycle_uses_explicit_agent_contract_routes():
     calls = []
 
