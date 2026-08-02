@@ -116,4 +116,13 @@ Describe 'EpicVM agent binding defaults' {
         Test-EpicVMBindAddress -Address '192.168.1.20' | Should -BeFalse
         Test-EpicVMBindAddress -Address '0.0.0.0' | Should -BeFalse
     }
+
+    It 'ships a guided Windows setup wrapper' {
+        $setupPath = Join-Path $windowsRoot 'setup.ps1'
+        Test-Path -LiteralPath $setupPath | Should -BeTrue
+        $setup = Get-Content -LiteralPath $setupPath -Raw
+        $setup | Should -Match 'TailscaleAddress'
+        $setup | Should -Match 'SwitchName'
+        $setup | Should -Match 'install.ps1'
+    }
 }

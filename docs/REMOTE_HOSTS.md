@@ -11,17 +11,18 @@ agent URL or bearer token. Host records are read from `/opt/blobe-vm/remote-host
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\install.ps1 -TailscaleAddress 100.72.220.117
+.\setup.ps1
 ```
 
-The installer binds the agent to that specific Tailscale address, stores the
-credential in a protected token file without printing it, and limits the
-Windows Firewall rule to Tailscale.
+The guided setup checks PowerShell 7, Hyper-V, and Tailscale, discovers the
+Tailscale address, asks for the optional Hyper-V switch, and runs the secure
+installer. For unattended setup, use `-TailscaleAddress`, `-SwitchName`, and
+`-NonInteractive`.
 
 3. Transfer the protected token file to the EpicVM server through a private
-channel. Keep it mode `0600`, then enroll it with
-`epicvm-remote-host add ... --token-file <path>`. Do not put it in shell
-history, URLs, browser payloads, or git.
+channel. Keep it mode `0600`, then run `sudo epicvm-remote-host setup`. The
+server wizard prompts for the host ID, display name, Tailscale agent URL, and
+protected token-file path, then probes the agent.
 
 ## Server enrollment
 

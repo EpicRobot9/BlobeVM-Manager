@@ -7,23 +7,35 @@ token.
 
 ## Install
 
-Run an elevated PowerShell 7 prompt on the Windows host:
+Recommended: run the guided setup from an elevated PowerShell 7 prompt on the
+Windows host:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
+.\setup.ps1
+```
+
+It checks PowerShell 7, Hyper-V, and Tailscale; discovers the Tailscale address;
+asks for the optional Hyper-V switch; runs the secure installer; and tells you
+exactly what to do next. For automation, pass `-TailscaleAddress`, optionally
+`-SwitchName`, and `-NonInteractive`.
+
+The lower-level installer remains available:
+
+```powershell
 .\install.ps1 -TailscaleAddress 100.72.220.117
 ```
 
 The installer writes the enrollment credential to the protected `agent.token`
 file and never prints it. Transfer that file through an approved secure channel
-to the EpicVM server, keep it mode `0600`, and enroll it with
-`epicvm-remote-host add ... --token-file <path>`.
+to the EpicVM server, then run `sudo epicvm-remote-host setup`. The server wizard
+asks for the host details, enrolls the protected token file, and probes the agent.
 It stores the real token under `C:\ProgramData\EpicVM\agent\agent.token`,
 creates the `EpicVMRemoteAgent` service, and opens TCP/8765 only for
 `100.64.0.0/10` (Tailscale's CGNAT range). The listener binds only to the
-supplied Tailscale address; wildcard binding is refused. Set `SwitchName` in the generated
-`config.json` before creating VMs if Hyper-V should attach a specific virtual
-switch.
+supplied Tailscale address; wildcard binding is refused. Set `SwitchName` in the
+generated `config.json` before creating VMs if Hyper-V should attach a specific
+virtual switch.
 
 A quick local check is:
 

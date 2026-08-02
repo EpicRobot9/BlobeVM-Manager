@@ -83,6 +83,8 @@ The optional `epicvm-remote-host` helper manages the server-side Windows/Hyper-V
 
 ```bash
 epicvm-remote-host token-generate --output /run/epicvm/agent.token
+epicvm-remote-host setup
+# Or use add --token-file for scripted/non-interactive enrollment
 epicvm-remote-host add win-gaming "Windows Gaming PC" http://100.64.12.34:8765 --token-file /run/epicvm/agent.token
 epicvm-remote-host probe win-gaming
 epicvm-remote-host disable win-gaming

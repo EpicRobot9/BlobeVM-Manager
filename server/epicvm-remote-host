@@ -227,11 +227,48 @@ def cmd_probe(args: argparse.Namespace) -> int:
         return 1
 
 
+def _prompt(label: str, default: str = "", *, required: bool = False) -> str:
+    suffix = f" [{default}]" if default else ""
+    while True:
+        value = input(f"{label}{suffix}: ").strip()
+        if value:
+            return value
+        if default:
+            return default
+        if not required:
+            return ""
+        print("A value is required.")
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Guide an operator through secure host enrollment without exposing tokens."""
+    if not sys.stdin.isatty():
+        raise SystemExit("setup requires an interactive terminal; use add with --token-file for automation")
+    print("EpicVM RemoteVM host setup")
+    print("The token stays in the protected file and is never printed.")
+    host_id = _prompt("Host ID", "epic-pc", required=True)
+    display_name = _prompt("Display name", "Epic PC", required=True)
+    agent_url = _prompt("Tailscale agent URL", required=True)
+    token_file = _prompt("Protected token file path", required=True)
+    add_args = argparse.Namespace(
+        host_id=host_id,
+        display_name=display_name,
+        agent_url=agent_url,
+        provider="hyperv",
+        token_file=token_file,
+        token_stdin=False,
+    )
+    cmd_add(add_args)
+    print("Probing the Windows agent...")
+    return int(cmd_probe(argparse.Namespace(host_id=host_id)))
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Manage EpicVM RemoteVM host enrollment")
     root.add_argument("--registry", dest="registry", help="override EPICVM_REMOTE_HOSTS_FILE")
     sub = root.add_subparsers(dest="command", required=True)
     sub.add_parser("list").set_defaults(func=cmd_list)
+    sub.add_parser("setup", help="interactively enroll a Windows RemoteVM host").set_defaults(func=cmd_setup)
     add = sub.add_parser("add")
     add.add_argument("host_id")
     add.add_argument("display_name")

@@ -79,8 +79,6 @@ def test_enable_disable_preserve_secret_and_change_only_state(tmp_path, capsys, 
     assert cli.main(["--registry", str(registry), "enable", "epic-pc"]) == 0
     enabled = json.loads(capsys.readouterr().out)
     assert enabled == {"enabled": True, "id": "epic-pc"}
-
-
 def test_non_tailscale_url_is_rejected_by_default(tmp_path, monkeypatch):
     cli = load_cli()
     registry = tmp_path / "remote-hosts.json"
@@ -93,3 +91,26 @@ def test_non_tailscale_url_is_rejected_by_default(tmp_path, monkeypatch):
             "--registry", str(registry), "add", "epic-pc", "Epic PC", "http://192.0.2.10:8765",
             "--token-file", str(token_file),
         ])
+
+
+def test_guided_setup_collects_enrollment_fields_and_probes(tmp_path, monkeypatch, capsys):
+    cli = load_cli()
+    registry = tmp_path / "remote-hosts.json"
+    token_file = tmp_path / "agent.token"
+    token_file.write_text("secret-token\n")
+    token_file.chmod(0o600)
+
+    class GuidedInput(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdin", GuidedInput(
+        "epic-pc\nEpic PC\nhttp://100.64.0.2:8765\n" + str(token_file) + "\n"
+    ))
+    monkeypatch.setattr(cli, "cmd_probe", lambda args: 0)
+
+    assert cli.main(["--registry", str(registry), "setup"]) == 0
+    output = capsys.readouterr().out
+    assert "secret-token" not in output
+    assert cli.read_hosts(registry)[0]["id"] == "epic-pc"
+    assert cli.read_hosts(registry)[0]["agent_url"] == "http://100.64.0.2:8765"
