@@ -1,149 +1,50 @@
-# Dashboard v2 (Modern UI)
+# EpicVM Dashboard (Modern UI)
 
-This document describes the new React + Vite dashboard that runs alongside the original dashboard UI.
+The EpicVM Dashboard is the modern React + Vite interface for the EpicVM VM platform. It runs alongside the legacy dashboard route so existing deployments can upgrade without losing established links.
 
-Overview
+## URLs and title
 
-- Served at `/Dashboard` and designed not to break the original dashboard.
-- Built with React 18 + Vite, uses Chart.js for charts and a set of components under `dashboard_v2/src/components`.
-- Local dev: `npm run dev`; production build: `npm run build` -> `dashboard_v2/dist`.
+- Modern UI: `/Dashboard`
+- Legacy-compatible UI/API base: `/dashboard`
+- Browser title: **EpicVM Dashboard**
 
-Pages
+The old `/dashboard` and `/Dashboard` routes, including established dashboard API paths, are legacy ABI retained for existing deployments.
 
-- Home (overview)
-- VM Manager
-- Resource Usage
-- Logs Viewer
-- Optimizer
-- Settings
-- API / System Info
-- Advanced Tools
-- Login
+## Pages and features
 
-Key Features
+- Home overview with live host metrics and charts
+- VM Manager for create/start/stop/restart/delete and VM links
+- Resource Usage and per-VM CPU/RAM information
+- Logs Viewer and short, non-interactive VM commands
+- EpicVM Optimizer profiles and capacity controls
+- Settings, API/System Info, Advanced Tools, and Login
 
-- Live host metrics and charts (`/Dashboard/api/stats`).
-- VM management: create/start/stop/restart/delete VMs, per-VM CPU/RAM bars, open VM links, instance details modal, and per-VM presentation settings (custom domain/host override, tab title, favicon).
-- Logs viewer with server-side tailing (`/Dashboard/api/vm/logs/<name>`).
-- Per-VM stats endpoint (`/Dashboard/api/vm/stats`) showing container-level CPU/memory/network values (parses `docker stats --no-stream`).
-- VM execute endpoint (`/Dashboard/api/vm/exec/<name>`) for running short commands inside `blobevm_<name>` containers (10s timeout, returns stdout/stderr/exit code).
-- Optimizer controls with density profiles (`single-user`, `small-group`, `multi-user`) plus custom capacity tuning for per-VM CPU/RAM budgeting and host reserve thresholds.
-- Toast notifications and a `VmExec` UI for running commands from the browser (non-interactive).
+VM operations act on EpicVM containers while preserving existing `blobevm_<name>` container names. The dashboard is focused on VM lifecycle, routing, and presentation.
 
-Server-side Notes
+## API highlights
 
-- Additions live in `dashboard/app.py` and are additive. The existing dashboard remains functional.
-- Authentication: v2 uses HMAC-signed tokens issued by `POST /Dashboard/api/auth/login`. Tokens are signed with `DASH_V2_SECRET` (fallback: Flask `SECRET_KEY`).
-- The old Basic auth flow continues to work. Server-side auth helpers accept either Basic credentials or a valid v2 token.
-- Diagnostics endpoint: `GET /dashboard/api/v2/info` (protected by old auth) reports build presence and `last_error` content.
+- `POST /Dashboard/api/auth/login` and `GET /Dashboard/api/auth/status`
+- `GET /Dashboard/api/stats`
+- `GET /Dashboard/api/vm/logs/<name>`
+- `GET /Dashboard/api/vm/stats`
+- `POST /Dashboard/api/vm/exec/<name>` (short, non-interactive command)
+- `POST /dashboard/api/create` and `POST /dashboard/api/delete/<name>`
+- `GET /dashboard/api/v2/info`
+- `GET /dashboard/api/optimizer/v2/summary`
 
-Important API Endpoints
+The legacy service ID `blobedash` and optimizer service ID `blobe-optimizer` remain valid compatibility identifiers. Existing `BLOBEVM_*` variables and `/opt/blobe-vm` state paths are likewise retained.
 
-- `POST /Dashboard/api/auth/login` — issue v2 token (reads admin password from existing dashboard settings).
-- `GET /Dashboard/api/auth/status` — validate current v2 token.
-- `GET /Dashboard/api/stats` — host/system metrics for charts and overview.
-- `GET /Dashboard/api/vm/logs/<name>` — tail logs for `blobevm_<name>` containers.
-- `GET /Dashboard/api/vm/stats` — current container stats (parsed `docker stats --no-stream`).
-- `POST /Dashboard/api/vm/exec/<name>` — run a short command inside a container (10s timeout).
-- `POST /dashboard/api/create` — create a new VM from the v2 manager.
-- `POST /dashboard/api/delete/<name>` — delete a VM from the v2 manager.
-- `GET /dashboard/api/vm-settings/<name>` — read per-VM title, host/domain override, and favicon state.
-- `POST /dashboard/api/vm-settings/<name>` — update per-VM title and host/domain override.
-- `POST /dashboard/api/upload-vm-favicon/<name>` — upload a per-VM favicon for the wrapper tab.
-- `GET /dashboard/api/v2/info` — v2 build presence and `last_error` (protected by old dashboard auth).
-- `GET /dashboard/api/optimizer/v2/summary` — optimizer summary, host pressure, capacity, VM states, density profiles, and trends.
-- `POST /dashboard/api/optimizer/density-profile` — apply a built-in optimizer density profile.
-- `POST /dashboard/api/optimizer/set` — save custom optimizer settings field-by-field.
-
-Installer & Build Behavior
-
-- `install.sh` now ensures `pip3` and `psutil` (for host metrics) and that a Docker CLI is available (installs `docker.io` if missing). Adjust Docker installation for your distro if needed.
-- When `dashboard_v2/package.json` exists, the installer runs `npm ci` and `npm run build` in `dashboard_v2` and captures stderr to `dashboard_v2/last_error.txt` on failure. The server endpoint `GET /dashboard/api/v2/info` reads this file to present build diagnostics in the original dashboard UI.
-
-Recommended workflow
---------------------
-
-There are two ways to keep dashboard_v2 builds reproducible and avoid installer failures:
-
-- **Preferred — commit a lockfile (deterministic installs):**
-	- Locally run `npm install` in `dashboard_v2` to generate `package-lock.json`, commit that lockfile to the repository, then the installer can use `npm ci` reliably on target machines.
-	- Example:
-
-```bash
-cd dashboard_v2
-npm install --no-audit --no-fund
-git add package-lock.json
-git commit -m "chore(dashboard_v2): add package-lock.json for reproducible installs"
-```
-
-- **Alternative — allow installer fallback (already implemented):**
-	- The installer now attempts `npm ci` and falls back to `npm install` when no lockfile is present. This ensures devDependencies like `vite` are installed so `npm run build` can succeed even if no lockfile exists.
-
-Quick fix on a target machine (what to run on the server)
-------------------------------------------------------
-
-If your install failed with `vite: not found`, run these commands on the target machine as root (or with `sudo`) inside `/opt/blobe-vm/dashboard_v2`:
-
-```bash
-cd /opt/blobe-vm/dashboard_v2
-npm install --no-audit --no-fund
-npm run build
-tail -n 200 /opt/blobe-vm/dashboard_v2/last_error.txt || true
-```
-
-Temporary workaround for dependency conflicts
---------------------------------------------
-
-If `npm install` fails with peer dependency resolution errors (ERESOLVE), you can retry the install as a temporary workaround using:
-
-```bash
-cd /opt/blobe-vm/dashboard_v2
-# allow installing despite peer dependency conflicts
-npm install --legacy-peer-deps --no-audit --no-fund
-npm run build
-```
-
-This accepts potentially incompatible peer dependencies (not ideal long-term). The repository now updates `@vitejs/plugin-react` to a Vite-5-compatible release to avoid this conflict.
-
-Notes
------
-- `vite` is a devDependency in `dashboard_v2/package.json`; building the production bundle requires it to be installed (either by `npm install` or by having it in node_modules from a prior `npm ci` with a lockfile).
-- The installer now appends build stderr to `dashboard_v2/last_error.txt` so the original dashboard can show diagnostics.
-
-Contact me if you want me to either commit a generated `package-lock.json` to the repo or attempt a local build in this workspace to verify the process.
-
-Build & Local Development
+## Local development
 
 ```bash
 cd dashboard_v2
 npm ci
-npm run dev   # development server
-npm run build # production build -> dashboard_v2/dist
+npm run dev
+npm run build
 ```
 
-Environment & Runtime
+A production build is written to `dashboard_v2/dist`. The installer records build diagnostics in `dashboard_v2/last_error.txt`; check `/dashboard/api/v2/info` when the modern UI does not load. Set `DASH_V2_SECRET` in production for signed dashboard tokens. The Docker CLI must be available to the dashboard process.
 
-- Set `DASH_V2_SECRET` in production for secure v2 tokens (fallback: Flask `SECRET_KEY`).
-- `docker` CLI must be available to the Flask process for container-level endpoints.
-- `psutil` is used for host metrics if present; the installer ensures it's installed via `pip3`.
+## Attribution and license
 
-Security & Limitations
-
-- `POST /Dashboard/api/vm/exec/<name>` is non-interactive and has a short timeout (10s). For interactive sessions use an SSH/websocket approach.
-- The v2 UI reads `new_dashboard_admin_password` from the original dashboard settings file; only the original dashboard should write it.
-
-Troubleshooting
-
-- If the v2 UI does not load, check `dashboard_v2/last_error.txt` for build errors and `GET /dashboard/api/v2/info` for diagnostics (requires original dashboard auth).
-- Ensure `DASH_V2_SECRET` is set and that `docker` and `psutil` are accessible to the dashboard process.
-
-Next Steps & Recommendations
-
-- Set `DASH_V2_SECRET` in production env vars.
-- Optimizer page now supports density presets for planning host capacity:
-  - `single-user`: conservative defaults for one main user.
-  - `small-group`: balanced settings for a few concurrent friends.
-  - `multi-user`: more aggressive packing assumptions for higher VM density.
-  - `custom`: manually set host CPU limits, RAM reserve, and estimated CPU/RAM budget per interactive or gaming VM.
-- Consider adding SSE/WebSocket streaming for interactive logs and terminals.
-- Optionally add an `nginx` sample config to `docs/` to show how to route `/Dashboard` and `/dashboard` behind a reverse proxy.
+EpicVM is a modified VM platform derived from DesktopOnCodespaces. It is distributed under the GNU General Public License version 3 (GPLv3); preserve the upstream attribution and repository `LICENSE` when redistributing it.

@@ -3,11 +3,11 @@
 set -euo pipefail
 set -o errtrace
 
-# BlobeVM Host/VPS Installer
+# EpicVM Host/VPS Installer
 # - Installs Docker and Traefik (default) OR runs in direct mode without a proxy
 # - Sets up a shared docker network "proxy" (Traefik mode only)
 # - Deploys Traefik (HTTP only by default, optional HTTPS via ACME) unless disabled
-# - Builds the BlobeVM image from this repository
+# - Builds the EpicVM image from this repository
 # - Installs the blobe-vm-manager CLI
 # - Optionally creates a first VM instance and prints its URL
 #
@@ -21,6 +21,7 @@ set -o errtrace
 #   DISABLE_DASHBOARD (legacy flag to skip dashboard deployment)
 #   BLOBEVM_NO_TRAEFIK (1 to run without Traefik; VMs get unique high ports)
 #   BLOBEVM_DIRECT_PORT_START (first port to try in direct/no-Traefik mode; default 20000)
+#   EPICVM_* equivalents are the canonical public names; BLOBEVM_* names remain compatible.
 
 trap 'echo "[ERROR] ${BASH_SOURCE[0]}: line ${LINENO} failed: ${BASH_COMMAND}" >&2' ERR
 
@@ -63,6 +64,33 @@ load_existing_env() {
     v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
     export "$k"="$v"
   done < "$env_file"
+}
+
+# Normalize the public EPICVM_* interface once, after persisted settings are loaded.
+# Keep all downstream logic on its historical BLOBEVM_* and legacy variable names.
+normalize_epicvm_environment() {
+  [[ -n "${EPICVM_DOMAIN:-}" ]] && BLOBEVM_DOMAIN="${EPICVM_DOMAIN}"
+  [[ -n "${EPICVM_EMAIL:-}" ]] && BLOBEVM_EMAIL="${EPICVM_EMAIL}"
+  [[ -n "${EPICVM_HTTP_PORT:-}" ]] && BLOBEVM_HTTP_PORT="${EPICVM_HTTP_PORT}"
+  [[ -n "${EPICVM_HTTPS_PORT:-}" ]] && BLOBEVM_HTTPS_PORT="${EPICVM_HTTPS_PORT}"
+  [[ -n "${EPICVM_DIRECT_PORT_START:-}" ]] && BLOBEVM_DIRECT_PORT_START="${EPICVM_DIRECT_PORT_START}"
+
+  if [[ -n "${EPICVM_ENABLE_DASHBOARD:-}" ]]; then
+    BLOBEVM_ENABLE_DASHBOARD="${EPICVM_ENABLE_DASHBOARD}"
+    ENABLE_DASHBOARD="$(normalize_bool "${EPICVM_ENABLE_DASHBOARD}")"
+    DISABLE_DASHBOARD=0
+  elif [[ -n "${BLOBEVM_ENABLE_DASHBOARD:-}" ]]; then
+    ENABLE_DASHBOARD="$(normalize_bool "${BLOBEVM_ENABLE_DASHBOARD}")"
+    DISABLE_DASHBOARD=0
+  fi
+
+  [[ -n "${EPICVM_INITIAL_VM_NAME:-}" ]] && BLOBEVM_INITIAL_VM_NAME="${EPICVM_INITIAL_VM_NAME}"
+  if [[ -n "${EPICVM_NO_TRAEFIK:-}" ]]; then
+    BLOBEVM_NO_TRAEFIK="${EPICVM_NO_TRAEFIK}"
+  elif [[ -n "${EPICVM_DIRECT_MODE:-}" ]]; then
+    BLOBEVM_NO_TRAEFIK="${EPICVM_DIRECT_MODE}"
+  fi
+  [[ -n "${EPICVM_FORCE_REBUILD:-}" ]] && BLOBEVM_FORCE_REBUILD="${EPICVM_FORCE_REBUILD}"
 }
 
 normalize_bool() {
@@ -155,7 +183,7 @@ prompt_dashboard_auth() {
 
   local dash_user dash_pass dash_pass_confirm dash_user_input
   dash_user="${BLOBEDASH_USER:-admin}"
-  read -rp "BlobeVM dashboard username [${dash_user}]: " dash_user_input || true
+  read -rp "EpicVM dashboard username [${dash_user}]: " dash_user_input || true
   [[ -n "${dash_user_input:-}" ]] && dash_user="${dash_user_input}"
   while true; do
     read -rsp "Preferred dashboard password: " dash_pass; echo
@@ -181,7 +209,7 @@ ensure_dashboard_secrets() {
 }
 
 prompt_config() {
-  echo "--- BlobeVM Host Configuration ---"
+  echo "--- EpicVM Host Configuration ---"
 
   if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
     echo "Mode: Direct (no Traefik). Each VM will be published on a unique high port."
@@ -303,9 +331,9 @@ prompt_config() {
   fi
   echo "  Web Dashboard: $([[ "${ENABLE_DASHBOARD}" -eq 1 ]] && echo yes || echo no) (set DISABLE_DASHBOARD=1 to skip)"
   if [[ -n "${BLOBEDASH_PASS:-}" ]]; then
-    echo "  BlobeVM Dashboard Auth: enabled (user: ${BLOBEDASH_USER:-admin})"
+    echo "  EpicVM Dashboard Auth: enabled (user: ${BLOBEDASH_USER:-admin})"
   else
-    echo "  BlobeVM Dashboard Auth: disabled"
+    echo "  EpicVM Dashboard Auth: disabled"
   fi
   if [[ -n "${TRAEFIK_DASHBOARD_AUTH}" ]]; then
     local summary_user="${DASH_AUTH_USER:-${TRAEFIK_DASHBOARD_AUTH%%:*}}"
@@ -1115,7 +1143,7 @@ services:
       - --certificatesresolvers.myresolver.acme.httpchallenge=true
       - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
 EOF
-    # Constrain Traefik provider to only discover BlobeVM-managed containers
+    # Constrain Traefik provider to only discover EpicVM-managed containers
     echo '      - --providers.docker.constraints=Label(`com.blobevm.managed`,`1`)' >> "$compose_file"
     if [[ "${FORCE_HTTPS:-0}" -eq 1 ]]; then
       cat >> "$compose_file" <<EOF
@@ -1169,7 +1197,7 @@ services:
       - --accesslog=true
       - --api.dashboard=true
 EOF
-    # Constrain Traefik provider to only discover BlobeVM-managed containers
+    # Constrain Traefik provider to only discover EpicVM-managed containers
     echo '      - --providers.docker.constraints=Label(`com.blobevm.managed`,`1`)' >> "$compose_file"
     {
       echo "    ports:";
@@ -1344,7 +1372,7 @@ deploy_dashboard_direct() {
     -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
     -v "${docker_bin}:/usr/bin/docker:ro" \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /opt/blobe-vm/dashboard/app.py:/app/app.py:ro \
+    -v /opt/blobe-vm/dashboard:/app:ro \
     -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
     -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
     -e DASH_V2_SECRET="${DASH_V2_SECRET:-}" \
@@ -1383,7 +1411,7 @@ build_image() {
   img_id=$(docker images -q "$image" 2>/dev/null || true)
 
   if [[ "$force" == "1" || -z "$img_id" || "$cur_hash" != "$prev_hash" ]]; then
-    echo "Building the BlobeVM image from $REPO_DIR ..."
+    echo "Building the EpicVM image from $REPO_DIR ..."
     docker build -t "$image" "$REPO_DIR"
     echo "$cur_hash" > "$hash_file" || true
     echo "Build complete."
@@ -1394,17 +1422,27 @@ build_image() {
 
 install_manager() {
   echo "Installing blobe-vm-manager CLI..."
-  # Only replace if changed to preserve running processes and avoid unnecessary writes
-  local src="$REPO_DIR/server/blobe-vm-manager" dst="/usr/local/bin/blobe-vm-manager"
+  # Only replace if changed to preserve running processes and avoid unnecessary writes.
+  local src="$REPO_DIR/server/epicvm" dst="/usr/local/bin/epicvm"
   if [[ -f "$dst" ]]; then
     if ! cmp -s "$src" "$dst"; then
       install -Dm755 "$src" "$dst"
     else
-      # Ensure permissions are correct even if unchanged
       chmod 755 "$dst"
     fi
   else
     install -Dm755 "$src" "$dst"
+  fi
+  # Keep the historical command as a compatibility launcher.
+  install -Dm755 "$REPO_DIR/server/blobe-vm-manager" /usr/local/bin/blobe-vm-manager
+  # RemoteVM host enrollment is a separate, VM-focused helper.
+  if [[ -f "$REPO_DIR/server/epicvm-remote-host" ]]; then
+    install -Dm755 "$REPO_DIR/server/epicvm-remote-host" /usr/local/bin/epicvm-remote-host
+    install -d -m 700 /opt/blobe-vm
+    if [[ ! -e /opt/blobe-vm/remote-hosts.json ]]; then
+      printf '{"version":1,"hosts":[]}\n' > /opt/blobe-vm/remote-hosts.json
+      chmod 600 /opt/blobe-vm/remote-hosts.json
+    fi
   fi
   mkdir -p /opt/blobe-vm/instances
   # Ensure dashboard app is available under /opt for both modes
@@ -1425,6 +1463,13 @@ install_manager() {
       fi
     done
     cp -f "$REPO_DIR/dashboard/app.py" /opt/blobe-vm/dashboard/app.py
+    # Keep the provider/RemoteVM imports beside the deployed app. Existing
+    # deployments often copy only app.py into /opt/blobe-vm/dashboard.
+    for dashboard_module in vm_hosts.py remote_hosts.py remote_agent_client.py; do
+      if [[ -f "$REPO_DIR/dashboard/$dashboard_module" ]]; then
+        install -Dm644 "$REPO_DIR/dashboard/$dashboard_module" "/opt/blobe-vm/dashboard/$dashboard_module"
+      fi
+    done
   fi
   # Build dashboard_v2 frontend (if present) so /Dashboard is available after install
   # dashboard_v2 build is handled by Docker Compose only
@@ -1537,7 +1582,7 @@ maybe_create_first_vm() {
 
 print_success() {
   echo
-  echo "BlobeVM host setup complete."
+  echo "EpicVM host setup complete."
   local base_path="${BASE_PATH:-/vm}"
   local http_suffix=""
   local https_suffix=""
@@ -1629,11 +1674,12 @@ main() {
     load_existing_env || true
   fi
 
+  normalize_epicvm_environment
   apply_env_overrides
   ASSUME_DEFAULTS=${ASSUME_DEFAULTS:-0}
 
   if [[ "$UPDATE_MODE" -eq 1 ]]; then
-    echo "Detected existing BlobeVM installation."
+    echo "Detected existing EpicVM installation."
     local reuse_cfg
     if [[ "${BLOBEVM_REUSE_SETTINGS:-}" == "1" ]]; then
       reuse_cfg="y"

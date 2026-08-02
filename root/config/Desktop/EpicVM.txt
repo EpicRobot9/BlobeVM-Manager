@@ -1,6 +1,6 @@
-Welcome to BlobeVM!
+Welcome to EpicVM!
 
-BlobeVM is a Virtual Machine that...
+EpicVM is a Virtual Machine that...
 * Runs entirely in a web browser
 * Is unblocked
 * Has Windows app support

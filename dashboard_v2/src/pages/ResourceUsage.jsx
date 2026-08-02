@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import apiFetch from '../lib/fetchWrapper'
+import { formatBytes } from '../lib/formatters.js'
 
 export default function ResourceUsage(){
   const [stats, setStats] = useState(null)
@@ -41,10 +42,10 @@ export default function ResourceUsage(){
             <div style={{gridColumn:'1 / -1',marginTop:8}}>
               <div style={{fontSize:12,color:'var(--muted)'}}>Disk</div>
               <div style={{marginTop:6}}>
-                {stats && stats.disk ? Object.entries(stats.disk).map(([k,v])=> (
-                  <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px dashed rgba(255,255,255,0.02)'}}>
-                    <div style={{color:'var(--muted)'}}>{k}</div>
-                    <div>{v.used} / {v.total} MB ({v.percent}%)</div>
+                {stats && Array.isArray(stats.disk) ? stats.disk.map(v=> (
+                  <div key={v.mountpoint} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px dashed rgba(255,255,255,0.02)'}}>
+                    <div style={{color:'var(--muted)'}}>{v.mountpoint}</div>
+                    <div>{formatBytes(v.used)} / {formatBytes(v.total)} ({v.percent}%)</div>
                   </div>
                 )) : <div style={{color:'var(--muted)'}}>—</div>}
               </div>

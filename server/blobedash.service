@@ -1,5 +1,5 @@
 [Unit]
-Description=BlobeVM Dashboard (direct mode)
+Description=EpicVM Dashboard (direct mode)
 After=docker.service
 Requires=docker.service
 

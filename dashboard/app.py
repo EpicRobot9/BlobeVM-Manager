@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, subprocess, shlex, base64, socket, threading, time, sqlite3, secrets
+import os, json, subprocess, shlex, base64, socket, threading, time, sqlite3, secrets, platform
 import shutil
 import re
 from urllib import request as urlrequest, error as urlerror
@@ -7,7 +7,15 @@ from urllib.parse import urlparse
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file, redirect
 import optimizer as dash_optimizer
+from runtime_stats import get_docker_stats
 import hmac, hashlib, time, base64
+from branding import PRODUCT_NAME, DASHBOARD_TITLE, MANAGER_NAME, AUTH_REALM
+try:
+    from .vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
+    from .remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record
+except ImportError:
+    from vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
+    from remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record
 try:
     import psutil
 except Exception:
@@ -20,6 +28,24 @@ app = Flask(__name__)
 # dashboard password remains read-only migration support for existing hosts.
 _LOGIN_ATTEMPTS = {}
 _LOGIN_LOCK = threading.Lock()
+
+# Dashboard escalation is an expensive, state-changing AI recovery request.
+# Keep the gate in-process so repeated clicks cannot launch concurrent agents.
+_HERMES_ESCALATION_COOLDOWN_SECONDS = 300
+_HERMES_ESCALATIONS = {}
+_HERMES_ESCALATION_LOCK = threading.Lock()
+
+def _claim_hermes_escalation(name: str, now=None):
+    now = time.time() if now is None else float(now)
+    with _HERMES_ESCALATION_LOCK:
+        previous = _HERMES_ESCALATIONS.get(name)
+        if previous is not None:
+            elapsed = max(0.0, now - previous)
+            remaining = int(max(0, _HERMES_ESCALATION_COOLDOWN_SECONDS - elapsed))
+            if remaining > 0:
+                return {'allowed': False, 'retry_after': remaining}
+        _HERMES_ESCALATIONS[name] = now
+    return {'allowed': True, 'retry_after': 0}
 
 def _allow_insecure_dashboard() -> bool:
     return os.environ.get('BLOBEVM_ALLOW_INSECURE_DASHBOARD') == '1'
@@ -79,7 +105,7 @@ def admin_auth_required(fn):
         basic_ok = check_auth(request.headers.get('Authorization'))
         token_ok = _verify_v2_token(request.cookies.get('Dashboard-Auth', ''))
         if not (basic_ok or token_ok):
-            return Response('Auth required', 401, {'WWW-Authenticate':'Basic realm="BlobeVM Dashboard"'})
+            return Response('Auth required', 401, {'WWW-Authenticate': f'Basic realm="{AUTH_REALM}"'})
         if request.method not in ('GET', 'HEAD', 'OPTIONS') and not _same_origin_request():
             return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
         return fn(*args, **kwargs)
@@ -142,6 +168,85 @@ if not os.path.isfile(MANAGER):
 HOST_DOCKER_BIN = os.environ.get('HOST_DOCKER_BIN') or '/usr/bin/docker'
 CONTAINER_DOCKER_BIN = os.environ.get('CONTAINER_DOCKER_BIN') or '/usr/bin/docker'
 DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
+
+# The local provider is the compatibility default.  A host id may be supplied
+# by newer callers, while legacy requests that only contain a VM name remain
+# local by default.
+LOCAL_VM_HOST = LocalDockerHost(manager=MANAGER)
+VM_HOST_REGISTRY = ConfiguredVmHostRegistry(LOCAL_VM_HOST)
+VM_HOSTS = VM_HOST_REGISTRY
+
+def _vm_host(host_id=None):
+    VM_HOST_REGISTRY.refresh()
+    if host_id is None:
+        host_id = 'local'
+        try:
+            host_id = request.values.get('host_id') or request.values.get('host') or host_id
+            if request.is_json:
+                payload = request.get_json(silent=True) or {}
+                if isinstance(payload, dict):
+                    host_id = payload.get('host_id') or payload.get('host') or host_id
+        except RuntimeError:
+            # Helpers used by background jobs have no request context.
+            pass
+    return VM_HOST_REGISTRY.get(host_id)
+
+
+def _vm_host_error_response(exc):
+    """Normalize provider errors without turning remote 404/409 into 500s."""
+    status = int(getattr(exc, 'status', 503) or 503)
+    status = status if 400 <= status <= 599 else 503
+    code = str(getattr(exc, 'code', 'host_unavailable') or 'host_unavailable')
+    return jsonify({'ok': False, 'error': str(exc), 'code': code}), status
+
+
+def _ensure_remote_vm_exists(host, name):
+    """Verify a selected remote host actually owns the VM being mutated.
+
+    A browser may select a host, but it is not authoritative for VM ownership.
+    When duplicate names are visible across remote hosts, fail closed instead of
+    allowing a destructive request to mutate the wrong machine.
+    """
+    if getattr(host, 'kind', 'local') != 'remote':
+        return
+    selected_id = str(getattr(host, 'host_id', '') or '')
+    selected_inventory = host.list_vms()
+    selected_has_vm = any(str(item.get('name', '')) == str(name) for item in selected_inventory)
+    registry = VM_HOST_REGISTRY
+    providers = getattr(registry, 'providers', {})
+    owners = []
+    provider_items = providers.items() if isinstance(providers, dict) else []
+    for candidate_id, candidate in provider_items:
+        candidate_id = str(candidate_id)
+        if candidate_id in {'local', selected_id} or getattr(candidate, 'kind', 'remote') != 'remote':
+            continue
+        inventories = []
+        cached_inventory = getattr(registry, 'cached_inventory', None)
+        if callable(cached_inventory):
+            try:
+                inventories.append(cached_inventory(candidate_id))
+            except Exception:
+                pass
+        try:
+            inventories.append(candidate.list_vms())
+        except Exception:
+            pass
+        if any(str(item.get('name', '')) == str(name) for inventory in inventories for item in inventory):
+            owners.append(candidate_id)
+    if owners:
+        owner_list = ', '.join(sorted(set(owners + ([selected_id] if selected_has_vm else []))))
+        raise VmHostUnavailable(
+            f"VM name is ambiguous across remote hosts: {owner_list}",
+            status=409,
+            code='ambiguous_vm_owner',
+        )
+    if not selected_has_vm:
+        raise VmHostUnavailable(
+            f"VM is not present on host {selected_id or 'remote'}",
+            status=404,
+            code='not_found',
+        )
+
 TEMPLATE = r"""
 <!doctype html><html><head><title>{{ title }}</title>
 {% if favicon_url %}<link rel="icon" href="{{ favicon_url }}" />{% endif %}
@@ -758,9 +863,9 @@ async function checkVM(ev,name){
             const msg = document.getElementById('settings-msg');
             if(j && j.ok){
                 if(msg) msg.textContent = 'Saved.';
-                document.getElementById('dash-title').textContent = title || 'BlobeVM Dashboard';
+                document.getElementById('dash-title').textContent = title || '{{ title }}';
                 // update the browser tab title immediately
-                try{ document.title = title || 'BlobeVM Dashboard'; }catch(e){}
+                try{ document.title = title || '{{ title }}'; }catch(e){}
                 // If a favicon was saved locally, reload page to pick it up
                 if(fav){
                     // small delay then reload to update favicon
@@ -827,7 +932,7 @@ async function checkVM(ev,name){
             if(j && j.ok){
                 el.style.border = '1px solid #10b981';
                 // Update the browser tab title to the saved VM title
-                try{ document.title = title || 'BlobeVM'; }catch(e){}
+                try{ document.title = title || '{{ manager_name }}'; }catch(e){}
                 // Update the small per-VM title display in the list
                 try{ const disp = document.getElementById('vmtitle-display-' + name); if(disp) disp.textContent = title || ''; }catch(e){}
                 setTimeout(()=> el.style.border='', 900);
@@ -1292,6 +1397,18 @@ def _vm_access_mode(name: str) -> str:
     mode = str(meta.get('access_mode') or 'public').strip().lower()
     return mode if mode in ('public', 'restricted') else 'public'
 
+
+def _admin_vm_sso_enabled() -> bool:
+    """Whether a valid Dashboard-Auth session may open restricted VMs."""
+    cfg = _load_dashboard_settings()
+    value = cfg.get('admin_vm_sso', True) if isinstance(cfg, dict) else True
+    return value is not False
+
+
+def _admin_vm_sso_authenticated() -> bool:
+    return _admin_vm_sso_enabled() and _verify_v2_token(request.cookies.get('Dashboard-Auth', ''))
+
+
 def _user_can_access_vm(user, name: str) -> bool:
     if _vm_access_mode(name) == 'public':
         return True
@@ -1315,7 +1432,7 @@ def _render_vm_denied(name: str, user):
     return Response(page, mimetype='text/html')
 
 def _enforce_vm_user_access(name: str):
-    if _vm_access_mode(name) == 'public':
+    if _vm_access_mode(name) == 'public' or _admin_vm_sso_authenticated():
         return None
     user = _current_portal_user()
     next_url = request.path
@@ -1430,14 +1547,16 @@ def _has_flag(name: str, flag: str, max_age_sec: int = 6*3600) -> bool:
         return False
 
 def _run_manager(*args):
-    """Run the manager with given args. If the primary manager doesn't support
-    the command (prints Usage/unknown), fall back to the repo script.
-    Returns (ok: bool, stdout: str, stderr: str, returncode: int).
+    """Run the selected host manager with given args.
+
+    If the primary manager doesn't support the command (prints Usage/unknown),
+    fall back to the repo script. Returns (ok, stdout, stderr, returncode).
     """
+    host = _vm_host()
     try:
-        r = subprocess.run([MANAGER, *args], capture_output=True, text=True)
-    except FileNotFoundError:
-        r = subprocess.CompletedProcess([MANAGER, *args], 127, '', 'not found')
+        r = host.run_manager(*args, capture_output=True, text=True)
+    except VmHostUnavailable:
+        r = subprocess.CompletedProcess(host.command(*args), 127, '', 'not found')
     ok = (r.returncode == 0)
     errtxt = (r.stderr or '') + ('' if ok else ('\n' + (r.stdout or '')))
     # Heuristic: if command not recognized or prints usage, try fallback
@@ -1543,25 +1662,27 @@ def _build_vm_url(name: str) -> str:
         return f'{base}{prefix}/'
     return f'{prefix}/'
 
-def manager_json_list():
+def manager_json_list(host_id=None):
     """Return a list of instances with best-effort status and URL.
-    Tries the manager 'list' first (requires docker CLI). Falls back to scanning
-    the instances directory and asking the manager for each URL individually.
+    Tries the selected provider's manager list first. Falls back to scanning
+    the instances directory and asking the provider for each URL individually.
     """
+    host_provider = _vm_host(host_id)
     instances = []
     try:
-        # Fast path: parse manager list output
-        out = subprocess.check_output([MANAGER, 'list'], text=True)
-        lines = [l[2:] for l in out.splitlines() if l.startswith('- ')]
-        for l in lines:
-            try:
-                parts = [p.strip() for p in l.split('->')]
-                name = parts[0].split()[0]
-                status = parts[1] if len(parts) > 1 else ''
-                url = parts[2] if len(parts) > 2 else ''
-                instances.append({'name': name, 'status': status, 'url': url})
-            except Exception:
-                pass
+        # Fast path: let the provider parse its inventory while preserving the
+        # existing manager command and output format.
+        instances = host_provider.list_vms()
+        if host_id and host_id != 'local':
+            # A remote provider owns its inventory; never fall back to the
+            # dashboard server's local instance directory for an empty result.
+            normalized = host_provider.normalize_inventory(instances)
+            if hasattr(VM_HOST_REGISTRY, 'remember_inventory'):
+                try:
+                    VM_HOST_REGISTRY.remember_inventory(host_id, normalized)
+                except Exception:
+                    pass
+            return normalized
         if instances:
             # In direct mode, override URL with host:published-port (or manager port) to avoid container IPs
             if _is_direct_mode():
@@ -1571,7 +1692,7 @@ def manager_json_list():
                     hp = _vm_host_port(cname)
                     if not hp:
                         try:
-                            hp = subprocess.check_output([MANAGER, 'port', it['name']], text=True).strip()
+                            hp = host_provider.check_output('port', it['name'], text=True).strip()
                         except Exception:
                             hp = ''
                     # Record explicit port for frontend
@@ -1591,9 +1712,25 @@ def manager_json_list():
                         it['status'] = 'Updating...'
                 except Exception:
                     pass
-            return instances
+            return host_provider.normalize_inventory(instances)
+    except VmHostUnavailable:
+        # A remote host owns its inventory. Falling back to this server's
+        # instance directory would relabel local VMs as remote and can send
+        # later actions to the wrong destination.
+        if host_id and host_id != 'local':
+            cached = VM_HOST_REGISTRY.cached_inventory(host_id) if hasattr(VM_HOST_REGISTRY, 'cached_inventory') else []
+            if cached:
+                for item in cached:
+                    item['host_online'] = False
+                    item['status'] = 'offline'
+                return cached
+            raise
     except Exception:
-        # likely docker CLI not present inside container -> fall back
+        # Local discovery remains best-effort for legacy deployments. A remote
+        # provider must never fall back to this server's instance directory.
+        if host_id and host_id != 'local':
+            raise
+        # likely docker CLI or manager is not present -> fall back
         pass
 
     # Fallback: scan instance folders and resolve URL per instance
@@ -1628,7 +1765,7 @@ def manager_json_list():
             hp = _vm_host_port(cname)
             if not hp:
                 try:
-                    hp = subprocess.check_output([MANAGER, 'port', name], text=True).strip()
+                    hp = host_provider.check_output('port', name, text=True).strip()
                 except Exception:
                     hp = ''
             if hp and host:
@@ -1636,7 +1773,7 @@ def manager_json_list():
             else:
                 # Fallback to manager per-VM URL (may be container IP, but last resort)
                 try:
-                    url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
+                    url = host_provider.check_output('url', name, text=True).strip()
                 except Exception:
                     url = ''
             if hp and hp.isdigit():
@@ -1652,7 +1789,7 @@ def manager_json_list():
         if port:
             inst['port'] = port
         instances.append(inst)
-    return instances
+    return host_provider.normalize_inventory(instances)
 
 def _read_env():
     env_path = os.path.join(_state_dir(), '.env')
@@ -1803,7 +1940,7 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode
             sequence.append('recreate')
     for action in sequence:
         try:
-            proc = subprocess.run([MANAGER, action, name], capture_output=True, text=True, timeout=90)
+            proc = _vm_host().run_manager(action, name, capture_output=True, text=True, timeout=90)
             attempt = {
                 'action': action,
                 'ok': proc.returncode == 0,
@@ -1822,7 +1959,7 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode
     return {'ok': False, 'recovered': False, 'attempts': attempts, 'status': final, 'message': 'VM recovery failed', 'source': source, 'mode': mode}
 
 
-def _escalate_vm_to_openclaw(name: str, reason: str, extra=None):
+def _escalate_vm_to_hermes(name: str, reason: str, extra=None):
     extra = extra or {}
     payload = {
         'vm': name,
@@ -1839,15 +1976,21 @@ def _escalate_vm_to_openclaw(name: str, reason: str, extra=None):
     with open(esc_path, 'w') as f:
         json.dump(payload, f, indent=2)
     msg = (
-        f"BlobeVM escalation from dashboard on host {payload['host']}. "
-        f"VM '{name}' needs recovery help. Reason: {reason}. "
-        f"Status: {json.dumps(payload['status'])}. "
-        f"Recent logs:\n{payload['logs'][:3000]}"
+        f"{MANAGER_NAME} recovery request from the dashboard. Act as the recovery operator: "
+        "inspect the VM and its recent logs, determine why it is down, and recover it "
+        "if safe and possible. Verify the result instead of assuming success. "
+        f"Host: {payload['host']}. VM: '{name}'. Reason: {reason}. "
+        f"Status: {json.dumps(payload['status'])}. Recent logs:\n{payload['logs'][:3000]}"
     )
     delivered = False
     cli_error = ''
     try:
-        proc = subprocess.run(['openclaw', 'agent', '--to', 'agent:main:main', '--message', msg], capture_output=True, text=True, timeout=45)
+        proc = subprocess.run(
+            ['hermes', 'chat', '-q', msg, '--toolsets', 'terminal', '--max-turns', '20', '--source', 'blobevm-dashboard', '--quiet'],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
         delivered = proc.returncode == 0
         if not delivered:
             cli_error = (proc.stderr or proc.stdout or '').strip()[:1200]
@@ -1881,7 +2024,7 @@ def _load_dashboard_settings():
     except Exception:
         pass
     # defaults
-    return {'title': 'BlobeVM Dashboard', 'favicon': ''}
+    return {'title': DASHBOARD_TITLE, 'favicon': ''}
 
 
 def _save_dashboard_settings(cfg: dict):
@@ -1925,11 +2068,18 @@ def api_get_settings():
 @app.post('/dashboard/api/settings')
 @auth_required
 def api_set_settings():
-    title = request.values.get('title','').strip()
-    favicon = request.values.get('favicon','').strip()
+    data = request.get_json(silent=True) if request.is_json else None
+    data = data if isinstance(data, dict) else request.values
+    title = str(data.get('title','') or '').strip()
+    favicon = str(data.get('favicon','') or '').strip()
     cfg = _load_dashboard_settings()
     if title:
         cfg['title'] = title
+    if 'adminVmSso' in data or 'admin_vm_sso' in data:
+        raw_sso = data.get('adminVmSso', data.get('admin_vm_sso'))
+        if isinstance(raw_sso, str):
+            raw_sso = raw_sso.strip().lower() in ('1', 'true', 'yes', 'on')
+        cfg['admin_vm_sso'] = bool(raw_sso)
     # Allow setting the v2 dashboard admin password from the old dashboard settings UI
     # Do not write the legacy dashboard password. New credentials are managed
     # exclusively by BLOBEDASH_USER/BLOBEDASH_PASS in /opt/blobe-vm/.env.
@@ -2044,6 +2194,8 @@ def api_upload_vm_favicon(name):
 
 @app.get('/dashboard/auth/vm/<name>')
 def dashboard_vm_forward_auth(name):
+    if _admin_vm_sso_authenticated():
+        return Response('OK', 200)
     user = _current_portal_user()
     next_url = request.headers.get('X-Forwarded-Uri') or request.args.get('next') or f'/dashboard/vm/{name}/'
     ext_base = _external_base_url()
@@ -2128,7 +2280,7 @@ def portal_start_vm(name):
     if not _user_can_access_vm(request.portal_user, name):
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
     try:
-        subprocess.check_call([MANAGER, 'start', name])
+        _vm_host().check_call('start', name)
         try:
             dash_optimizer.note_vm_activity(name, 'portal-start')
         except Exception:
@@ -2143,7 +2295,7 @@ def portal_stop_vm(name):
     if not _user_can_access_vm(request.portal_user, name):
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
     try:
-        subprocess.check_call([MANAGER, 'stop', name])
+        _vm_host().check_call('stop', name)
         return jsonify({'ok': True})
     except subprocess.CalledProcessError as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -2189,7 +2341,7 @@ def portal_login_page():
         return redirect(_safe_portal_next(request.args.get('next')))
     next_url = _safe_portal_next(request.args.get('next'))
     next_js = json.dumps(next_url)
-    page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VM Login</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:420px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px}}input,button{{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#020617;color:#fff;margin-top:10px}}button{{background:#2563eb;cursor:pointer}}.muted{{opacity:.75}}</style></head><body><div class=card><h1>VM Login</h1><div class=muted>Sign in to access restricted BlobeVM instances.</div><form onsubmit="return doLogin(event)"><input id=u placeholder="Username" autocomplete="username" /><input id=p type=password placeholder="Password" autocomplete="current-password" /><button>Sign in</button><div id=err style="color:#fca5a5;margin-top:10px"></div></form></div><script>async function doLogin(e){{e.preventDefault();const r=await fetch('/portal/api/auth/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:document.getElementById('u').value,password:document.getElementById('p').value}})}});const j=await r.json().catch(()=>({{}}));if(j.ok){{location.href={next_js};return false}}document.getElementById('err').textContent=j.error||'Login failed';return false}}</script></body></html>'''
+    page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{MANAGER_NAME} Login</title><style>body{{margin:0;font-family:system-ui,Arial;background:#08101f;color:#eef2ff;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:420px;width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px}}input,button{{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:#020617;color:#fff;margin-top:10px}}button{{background:#2563eb;cursor:pointer}}.muted{{opacity:.75}}</style></head><body><div class=card><h1>{MANAGER_NAME} Login</h1><div class=muted>Sign in to access restricted {PRODUCT_NAME} instances.</div><form onsubmit="return doLogin(event)"><input id=u placeholder="Username" autocomplete="username" /><input id=p type=password placeholder="Password" autocomplete="current-password" /><button>Sign in</button><div id=err style="color:#fca5a5;margin-top:10px"></div></form></div><script>async function doLogin(e){{e.preventDefault();const r=await fetch('/portal/api/auth/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:document.getElementById('u').value,password:document.getElementById('p').value}})}});const j=await r.json().catch(()=>({{}}));if(j.ok){{location.href={next_js};return false}}document.getElementById('err').textContent=j.error||'Login failed';return false}}</script></body></html>'''
     return Response(page, mimetype='text/html')
 
 @app.get('/dashboard/api/users')
@@ -2305,7 +2457,7 @@ def dashboard_v2_status_public():
         return jsonify({'ok': False, 'authRequired': True, 'configured': False}), 503
     token = request.cookies.get('Dashboard-Auth')
     ok = bool(token and _verify_v2_token(token))
-    return jsonify({'ok': ok, 'authRequired': True, 'configured': True})
+    return jsonify({'ok': ok, 'authRequired': True, 'configured': True, 'username': user if ok else None})
 
 @app.post('/Dashboard/api/auth/logout')
 def dashboard_v2_logout_public():
@@ -2385,7 +2537,7 @@ def api_set_vm_title(name):
                 return
             # Call manager set-title; allow empty title to clear
             # Use Popen so we don't block the request
-            subprocess.Popen([mgr, 'set-title', n, t], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(_vm_host().command('set-title', n, t), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
@@ -2674,38 +2826,22 @@ def python_gather_stats():
             out['swap']['used'] = int(sp[2])
     except Exception:
         pass
-    # docker stats fallback
+    # Docker stats are shared with the VM endpoint and optimizer.
     try:
-        d = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}"], text=True)
-        for l in d.splitlines():
-            if not l.strip():
-                continue
-            parts = l.split('|')
-            if len(parts) >= 4:
-                name = parts[0]
-                cpu = 0.0
-                try:
-                    cpu = float(parts[1].strip().replace('%',''))
-                except Exception:
-                    cpu = 0.0
-                memperc = 0.0
-                try:
-                    memperc = float(parts[2].strip().replace('%',''))
-                except Exception:
-                    memperc = 0.0
-                memusage = parts[3].strip()
-                # attempt to parse bytes from memusage like '12.3MiB / 1.95GiB'
-                m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
-                memBytes = 0
-                if m:
-                    n = float(m.group(1)); u = m.group(2).upper()
-                    mul = 1024
-                    if u.startswith('M'):
-                        mul = 1024*1024
-                    elif u.startswith('G'):
-                        mul = 1024*1024*1024
-                    memBytes = int(n * mul)
-                out['containers'].append({'name': name, 'cpu': cpu, 'memperc': memperc, 'memBytes': memBytes})
+        for record in get_docker_stats():
+            memusage = str(record['mem_usage'])
+            m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
+            memBytes = 0
+            if m:
+                n = float(m.group(1)); u = m.group(2).upper()
+                mul = 1024
+                if u.startswith('M'):
+                    mul = 1024*1024
+                elif u.startswith('G'):
+                    mul = 1024*1024*1024
+                memBytes = int(n * mul)
+            out['containers'].append({'name': record['name'], 'cpu': record['cpu_percent'],
+                                      'memperc': record['mem_percent'], 'memBytes': memBytes})
     except Exception:
         pass
     return out
@@ -2795,7 +2931,7 @@ def api_set_domain():
                     # remove container and start via manager to ensure labels/networks are applied
                     _docker('rm', '-f', cname)
                     try:
-                        subprocess.run([MANAGER, 'start', name], check=False)
+                        _vm_host().run_manager('start', name, check=False)
                     except Exception:
                         pass
             except Exception:
@@ -2879,7 +3015,7 @@ def _enable_single_port(port: int):
         cname = f'blobevm_{name}'
         _docker('rm', '-f', cname)
         try:
-            subprocess.run([MANAGER, 'start', name], check=False)
+            _vm_host().run_manager('start', name, check=False)
         except Exception:
             pass
 
@@ -2909,7 +3045,7 @@ def _disable_single_port(dash_port: int | None):
         cname = f'blobevm_{name}'
         _docker('rm', '-f', cname)
         try:
-            subprocess.run([MANAGER, 'start', name], check=False)
+            _vm_host().run_manager('start', name, check=False)
         except Exception:
             pass
 
@@ -2944,7 +3080,7 @@ def root():
         fav = '/dashboard/favicon.ico'
     else:
         fav = cfg.get('favicon','')
-    title = cfg.get('title', 'BlobeVM Dashboard')
+    title = cfg.get('title', DASHBOARD_TITLE)
 
     # Only show v2 dashboard link if custom domain is set and container is running
     dashboard_v2_url = None
@@ -2962,61 +3098,166 @@ def root():
     except Exception:
         dashboard_v2_url = None
 
-    return render_template_string(TEMPLATE, title=title, favicon_url=fav, dashboard_v2_url=dashboard_v2_url)
+    return render_template_string(TEMPLATE, title=title, manager_name=MANAGER_NAME, favicon_url=fav, dashboard_v2_url=dashboard_v2_url)
+
+
+def manager_json_fleet_list():
+    """Return VM inventory from every configured host, omitting unavailable hosts."""
+    VM_HOST_REGISTRY.refresh()
+    instances = []
+    for host_id in VM_HOST_REGISTRY.providers:
+        try:
+            # Keep the no-argument local call as a compatibility seam for
+            # existing overview tests and integrations; remote providers need
+            # an explicit host id.
+            listed = manager_json_list() if host_id == 'local' else manager_json_list(host_id)
+            instances.extend(listed)
+        except VmHostUnavailable:
+            continue
+        except Exception:
+            # A single remote host must not make local inventory disappear.
+            if host_id == 'local':
+                raise
+    return instances
+
 
 @app.get('/dashboard/api/list')
 @auth_required
 def api_list():
+    # Historical callers receive the local manager inventory exactly as
+    # before.  The modern placement-aware dashboard opts into fleet mode so
+    # legacy action URLs cannot accidentally act on a remote card as local.
+    if request.args.get('fleet', '').lower() in {'1', 'true', 'yes'}:
+        return jsonify({'instances': manager_json_fleet_list()})
     return jsonify({'instances': manager_json_list()})
+
+
+@app.get('/dashboard/api/hosts')
+@auth_required
+def api_hosts():
+    """Return redacted local/remote host inventory for dashboard placement UI."""
+    try:
+        VM_HOST_REGISTRY.refresh()
+        hosts = [redact_host_record(record) for record in VM_HOST_REGISTRY.public_records()]
+        payload = {'ok': True, 'hosts': hosts}
+        if getattr(VM_HOST_REGISTRY, 'config_error', ''):
+            payload['warning'] = VM_HOST_REGISTRY.config_error
+        return jsonify(payload)
+    except RemoteHostConfigError as exc:
+        return jsonify({'ok': False, 'hosts': [], 'error': str(exc)}), 500
+
+
+@app.get('/dashboard/api/overview')
+@auth_required
+def api_overview():
+    try:
+        return jsonify({'ok': True, **_dashboard_overview_payload()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/Dashboard/api/<path:subpath>', methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'])
+def dashboard_api_case_compat(subpath):
+    """Dispatch capitalized public API paths to legacy lower-case routes.
+
+    The public deployment is mounted at /Dashboard, while older routes use
+    /dashboard. Keep both spellings functional without duplicating every
+    route decorator or changing legacy URLs.
+    """
+    from werkzeug.exceptions import NotFound
+    adapter = app.url_map.bind_to_environ(request.environ)
+    try:
+        endpoint, values = adapter.match('/dashboard/api/' + subpath, method=request.method)
+    except NotFound:
+        return jsonify({'ok': False, 'error': 'Not found'}), 404
+    view = app.view_functions.get(endpoint)
+    if view is None:
+        return jsonify({'ok': False, 'error': 'Not found'}), 404
+    return view(**values)
+
 
 @app.post('/dashboard/api/create')
 @auth_required
 def api_create():
-    name = request.form.get('name','').strip()
+    payload = request.get_json(silent=True) if request.is_json else None
+    payload = payload if isinstance(payload, dict) else request.form.to_dict(flat=True)
+    name = str(payload.get('name', '')).strip()
     if not name:
         return jsonify({'ok': False, 'error': 'No name provided'}), 400
+    requested_host_id = str(payload.get('host_id') or payload.get('host') or 'local').strip() or 'local'
+    requested_placement = str(payload.get('placement') or ('local' if requested_host_id == 'local' else 'remote')).strip().lower()
+    if requested_placement not in {'local', 'remote'}:
+        return jsonify({'ok': False, 'error': 'placement must be local or remote'}), 400
+    if (requested_placement == 'local') != (requested_host_id == 'local'):
+        return jsonify({'ok': False, 'error': 'placement and host_id do not agree'}), 400
     try:
-        result = subprocess.run([MANAGER, 'create', name], capture_output=True, text=True)
+        host = _vm_host(requested_host_id)
+        if getattr(host, 'kind', 'local') == 'remote':
+            host_record = next(
+                (item for item in VM_HOST_REGISTRY.public_records() if item.get('id') == requested_host_id),
+                None,
+            )
+            if not host_record or not host_record.get('online'):
+                return jsonify({'ok': False, 'error': 'Selected VM host is offline.', 'code': 'host_offline'}), 409
+            if not (host_record.get('capabilities') or {}).get('create_vm'):
+                return jsonify({'ok': False, 'error': 'Selected VM host cannot create VMs.', 'code': 'capability_unavailable'}), 409
+            spec = {
+                key: payload[key]
+                for key in ('image', 'cpu', 'memory', 'disk', 'profile')
+                if payload.get(key) not in (None, '')
+            }
+            result = host.create(name, spec)
+        else:
+            result = host.run_manager('create', name, capture_output=True, text=True)
         if result.returncode == 125:
             # Docker exit 125: container name conflict or similar
             msg = result.stderr.strip() or 'VM already exists or container conflict.'
             # Try to start anyway
-            subprocess.run([MANAGER, 'start', name], capture_output=True)
+            host.run_manager('start', name, capture_output=True)
             return jsonify({'ok': False, 'error': msg})
         elif result.returncode != 0:
             return jsonify({'ok': False, 'error': result.stderr.strip() or 'Error creating VM.'}), 500
-        # Auto-start after creation
-        subprocess.run([MANAGER, 'start', name], capture_output=True)
+        # Preserve the local manager's auto-start behavior for remote agents.
+        host.run_manager('start', name, capture_output=True)
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
     except FileNotFoundError:
         return jsonify({'ok': False, 'error': 'blobe-vm-manager not found in container. Make sure it is installed and mounted.'}), 500
     except Exception as e:
         return jsonify({'ok': False, 'error': f'Error creating VM: {e}'}), 500
-    return jsonify({'ok': True})
+    return jsonify({'ok': True, 'host_id': getattr(host, 'host_id', 'local'), 'placement': getattr(host, 'kind', 'local')})
 
 @app.post('/dashboard/api/start/<name>')
 @auth_required
 def api_start(name):
     force = request.values.get('force') in ('1', 'true', 'yes', 'on')
+    try:
+        host = _vm_host()
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    is_remote = getattr(host, 'kind', 'local') == 'remote'
     # Safe-start: reject if already running
+    if not is_remote:
+        try:
+            cname = f'blobevm_{name}'
+            r = _docker('ps', '-q', '-f', f'name=^{cname}$')
+            if r.returncode == 0 and r.stdout.strip():
+                return jsonify({'ok': False, 'error': 'VM already running'})
+        except Exception:
+            pass
+        try:
+            opt_status = dash_optimizer.status()
+            stats = opt_status.get('stats') or {}
+            profiles = (stats.get('profiles') or {}) if isinstance(stats, dict) else {}
+            profile = profiles.get(name, 'desktop')
+            start_ok = dash_optimizer._can_start_vm(opt_status.get('cfg') or {}, stats.get('vmStates') or [], stats.get('hostPressure') or {}, profile=profile, force=force)
+            if not start_ok.get('ok'):
+                return jsonify({'ok': False, 'error': start_ok.get('reason') or 'Start blocked by optimizer', 'code': start_ok.get('code'), 'optimizer': start_ok}), 409
+        except Exception:
+            pass
     try:
-        cname = f'blobevm_{name}'
-        r = _docker('ps', '-q', '-f', f'name=^{cname}$')
-        if r.returncode == 0 and r.stdout.strip():
-            return jsonify({'ok': False, 'error': 'VM already running'})
-    except Exception:
-        pass
-    try:
-        opt_status = dash_optimizer.status()
-        stats = opt_status.get('stats') or {}
-        profiles = (stats.get('profiles') or {}) if isinstance(stats, dict) else {}
-        profile = profiles.get(name, 'desktop')
-        start_ok = dash_optimizer._can_start_vm(opt_status.get('cfg') or {}, stats.get('vmStates') or [], stats.get('hostPressure') or {}, profile=profile, force=force)
-        if not start_ok.get('ok'):
-            return jsonify({'ok': False, 'error': start_ok.get('reason') or 'Start blocked by optimizer', 'code': start_ok.get('code'), 'optimizer': start_ok}), 409
-    except Exception:
-        pass
-    try:
-        result = subprocess.run([MANAGER, 'start', name], capture_output=True, text=True)
+        _ensure_remote_vm_exists(host, name)
+        result = host.run_manager('start', name, capture_output=True, text=True)
         if result.returncode != 0:
             return jsonify({'ok': False, 'error': result.stderr.strip() or 'Failed to start VM'}), 500
         try:
@@ -3024,6 +3265,8 @@ def api_start(name):
         except Exception:
             pass
         return jsonify({'ok': True})
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
     except FileNotFoundError:
         return jsonify({'ok': False, 'error': 'blobe-vm-manager not found'}), 500
     except Exception as e:
@@ -3033,9 +3276,15 @@ def api_start(name):
 @app.get('/dashboard/api/vm/<name>/status')
 @auth_required
 def api_vm_status(name):
-    """Return rich state for the VM container."""
+    """Return rich state for the selected local or remote VM."""
     try:
+        host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
+        if getattr(host, 'kind', 'local') == 'remote':
+            return jsonify({'ok': True, **host.status(name), 'placement': 'remote', 'host_id': host.host_id, 'host_name': host.host_name})
         return jsonify(_vm_status_payload(name))
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -3056,13 +3305,22 @@ def api_vm_recover(name):
 @app.post('/dashboard/api/vm/<name>/escalate')
 @auth_required
 def api_vm_escalate(name):
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', name or ''):
+        return jsonify({'ok': False, 'error': 'Invalid VM name'}), 400
+    claim = _claim_hermes_escalation(name)
+    if not claim['allowed']:
+        return jsonify({
+            'ok': False,
+            'error': 'Hermes is already handling this VM',
+            'retryAfter': claim['retry_after'],
+        }), 429
     try:
         data = request.get_json(silent=True) or {}
         reason = data.get('reason') if isinstance(data, dict) else None
         if not reason:
-            reason = 'Dashboard escalation requested by user'
-        rec = _recover_vm(name, source='openclaw-escalation', aggressive=True)
-        esc = _escalate_vm_to_openclaw(name, reason, {'recovery': rec, 'request': data})
+            reason = 'Dashboard recovery help requested by user'
+        rec = _recover_vm(name, source='hermes-escalation', aggressive=True)
+        esc = _escalate_vm_to_hermes(name, reason, {'recovery': rec, 'request': data})
         return jsonify({'ok': True, 'recovery': rec, 'escalation': esc})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -3070,14 +3328,28 @@ def api_vm_escalate(name):
 @app.post('/dashboard/api/stop/<name>')
 @auth_required
 def api_stop(name):
-    subprocess.check_call([MANAGER, 'stop', name])
-    return jsonify({'ok': True})
+    try:
+        host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
+        host.check_call('stop', name)
+        return jsonify({'ok': True})
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
 
 @app.post('/dashboard/api/delete/<name>')
 @auth_required
 def api_delete(name):
-    subprocess.check_call([MANAGER, 'delete', name])
-    return jsonify({'ok': True})
+    try:
+        host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
+        host.check_call('delete', name)
+        return jsonify({'ok': True})
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
 
 
 def _read_proc_stat_cpu():
@@ -3232,6 +3504,47 @@ def _get_system_stats():
         return {'cpu':{}, 'memory':{}, 'disk':[], 'network':{}, 'uptime':0, 'loadavg':[], 'temps':{}}
 
 
+def _read_os_release():
+    values = {}
+    try:
+        with open('/etc/os-release', encoding='utf-8') as handle:
+            for line in handle:
+                key, separator, value = line.partition('=')
+                if separator:
+                    values[key.strip()] = value.strip().strip('"')
+    except Exception:
+        pass
+    return values.get('PRETTY_NAME') or values.get('NAME') or 'Unknown OS'
+
+
+def _kernel_release():
+    try:
+        return platform.release() or 'Unknown kernel'
+    except Exception:
+        return 'Unknown kernel'
+
+
+def _dashboard_overview_payload():
+    optimizer_state = dash_optimizer.status() or {}
+    stats = optimizer_state.get('stats') or {}
+    host_stats = _get_system_stats()
+    history = (stats.get('history') or {}).get('events') or []
+    recent = optimizer_state.get('lastRun', {}).get('events') or []
+    activity = [event for event in [*history, *recent] if isinstance(event, dict)]
+    activity.sort(key=lambda event: int(event.get('ts') or 0), reverse=True)
+    return {
+        'host': {
+            'hostname': platform.node() or 'Unknown host',
+            'os': _read_os_release(),
+            'kernel': _kernel_release(),
+            'uptimeSeconds': (host_stats or {}).get('uptime', 0),
+        },
+        'stats': host_stats,
+        'instances': manager_json_fleet_list(),
+        'activity': activity[:8],
+    }
+
+
 @app.get('/Dashboard/api/stats')
 @v2_auth_required
 def dashboard_v2_stats():
@@ -3258,6 +3571,14 @@ def dashboard_v2_status_alias():
 @app.get('/Dashboard/api/vm/logs/<name>')
 @v2_auth_required
 def dashboard_v2_vm_logs(name):
+    # Remote agents own their VM logs; local VMs retain the Docker path.
+    try:
+        host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
+        if getattr(host, 'kind', 'local') == 'remote':
+            return jsonify({'ok': True, 'logs': host.logs(name), 'placement': 'remote', 'host_id': host.host_id})
+    except VmHostUnavailable as exc:
+        return jsonify({'ok': False, 'error': str(exc), 'logs': ''}), getattr(exc, 'status', 503)
     # Return last 400 lines of docker logs for the named VM container (blobevm_<name>)
     cname = f'blobevm_{name}'
     try:
@@ -3282,40 +3603,17 @@ def dashboard_v2_vm_stats():
     """Return per-VM CPU and memory percentages by calling `docker stats --no-stream`.
     The result maps VM name (without the `blobevm_` prefix) to {'cpu_percent': float, 'mem_percent': float}.
     """
-    try:
-        out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}'], text=True)
-    except subprocess.CalledProcessError as e:
-        return jsonify({'ok': False, 'error': str(e), 'output': getattr(e, 'output', '')}), 500
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
     stats = {}
     try:
-        for line in out.splitlines():
-            if not line.strip():
-                continue
-            try:
-                parts = line.split('|')
-                cname = parts[0].strip()
-                cpu_raw = parts[1].strip() if len(parts) > 1 else ''
-                mem_raw = parts[2].strip() if len(parts) > 2 else ''
-                # strip trailing percent sign
-                cpu = 0.0
-                mem = 0.0
-                try:
-                    cpu = float(cpu_raw.strip().rstrip('%'))
-                except Exception:
-                    cpu = 0.0
-                try:
-                    mem = float(mem_raw.strip().rstrip('%'))
-                except Exception:
-                    mem = 0.0
-                # Normalize VM name if container is named blobevm_<name>
-                vmname = cname
-                if vmname.startswith('blobevm_'):
-                    vmname = vmname[len('blobevm_'):]
-                stats[vmname] = {'cpu_percent': round(cpu,2), 'mem_percent': round(mem,2), 'container_name': cname}
-            except Exception:
-                continue
+        for record in get_docker_stats():
+            cname = record['name']
+            cpu = record['cpu_percent']
+            mem = record['mem_percent']
+            # Normalize VM name if container is named blobevm_<name>
+            vmname = cname
+            if vmname.startswith('blobevm_'):
+                vmname = vmname[len('blobevm_'):]
+            stats[vmname] = {'cpu_percent': round(cpu,2), 'mem_percent': round(mem,2), 'container_name': cname}
         return jsonify({'ok': True, 'vms': stats})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -3417,19 +3715,20 @@ def api_reset(name):
     they really want to purge instance data.
     """
     try:
+        host = _vm_host()
         def worker(vm_name):
             try:
                 # Use manager delete which should remove container and instance data
-                subprocess.run([MANAGER, 'delete', vm_name], capture_output=True, text=True)
+                host.run_manager('delete', vm_name, capture_output=True, text=True)
             except Exception:
                 pass
             try:
                 # Create a fresh instance and start it
-                subprocess.run([MANAGER, 'create', vm_name], capture_output=True, text=True)
+                host.run_manager('create', vm_name, capture_output=True, text=True)
             except Exception:
                 pass
             try:
-                subprocess.run([MANAGER, 'start', vm_name], capture_output=True, text=True)
+                host.run_manager('start', vm_name, capture_output=True, text=True)
             except Exception:
                 pass
         threading.Thread(target=worker, args=(name,), daemon=True).start()
@@ -3441,9 +3740,13 @@ def api_reset(name):
 @auth_required
 def api_restart(name):
     try:
-        r = subprocess.run([MANAGER, 'restart', name], capture_output=True, text=True)
+        host = _vm_host()
+        _ensure_remote_vm_exists(host, name)
+        r = host.run_manager('restart', name, capture_output=True, text=True)
         ok = (r.returncode == 0)
         return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -3455,7 +3758,7 @@ def api_recreate():
     if not names:
         return jsonify({'error': 'No VM names provided'}), 400
     try:
-        result = subprocess.run([MANAGER, 'recreate', *names], capture_output=True, text=True)
+        result = _vm_host().run_manager('recreate', *names, capture_output=True, text=True)
         ok = (result.returncode == 0)
         return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
     except Exception as e:
@@ -3469,9 +3772,10 @@ def api_rebuild_vms():
         return jsonify({'error': 'No VM names provided'}), 400
     for n in names:
         _set_flag(n, 'rebuilding', True)
+    host = _vm_host()
     def worker(targets):
         try:
-            result = subprocess.run([MANAGER, 'rebuild-vms', *targets], capture_output=True, text=True)
+            result = host.run_manager('rebuild-vms', *targets, capture_output=True, text=True)
             return result.returncode == 0, (result.stdout or '') + (result.stderr or '')
         finally:
             for n in targets:
@@ -3493,10 +3797,10 @@ def api_update_and_rebuild():
             targets = []
     for n in targets:
         _set_flag(n, 'rebuilding', True)
+    host = _vm_host()
     def worker(tgts):
         try:
-            args = [MANAGER, 'update-and-rebuild'] + names
-            result = subprocess.run(args, capture_output=True, text=True)
+            result = host.run_manager('update-and-rebuild', *names, capture_output=True, text=True)
             return result.returncode == 0, (result.stdout or '') + (result.stderr or '')
         finally:
             for n in tgts:
@@ -3511,8 +3815,9 @@ def api_delete_all_instances():
     if data.get('confirm') != 'DELETE':
         return jsonify({'ok': False, 'error': 'Type DELETE to confirm deleting every VM'}), 400
     try:
+        host = _vm_host()
         def worker():
-            result = subprocess.run([MANAGER, 'delete-all-instances', '--yes'], capture_output=True, text=True)
+            result = host.run_manager('delete-all-instances', '--yes', capture_output=True, text=True)
             return result.returncode == 0, (result.stdout or '') + (result.stderr or '')
         job_id = _start_job('delete-all-instances', [], worker)
         return jsonify({'ok': True, 'jobId': job_id}), 202
@@ -3539,12 +3844,13 @@ def api_reset_all_instances():
             except Exception:
                 names = []
 
+        host = _vm_host()
         def worker(all_names):
             output = []
             ok = True
             for n in all_names:
                 for action in ('delete', 'create', 'start'):
-                    result = subprocess.run([MANAGER, action, n], capture_output=True, text=True)
+                    result = host.run_manager(action, n, capture_output=True, text=True)
                     output.append((result.stdout or '') + (result.stderr or ''))
                     ok = ok and result.returncode == 0
             return ok, '\n'.join(output)
@@ -3557,7 +3863,7 @@ def api_reset_all_instances():
 @app.post('/dashboard/api/prune-docker')
 @auth_required
 def api_prune_docker():
-    """Prune only Docker resources explicitly owned by BlobeVM."""
+    """Prune only Docker resources explicitly owned by EpicVM."""
     def worker():
         results = [
             _docker('container', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),
@@ -3721,7 +4027,7 @@ def api_check(name):
     try:
         cname = f'blobevm_{name}'
         subprocess.run(['docker', 'rm', '-f', cname], capture_output=True)
-        subprocess.run([MANAGER, 'start', name], capture_output=True)
+        _vm_host().run_manager('start', name, capture_output=True)
         for _ in range(8):
             time.sleep(1)
             url = _build_vm_url(name)
@@ -3852,6 +4158,26 @@ def api_vm_notifications(name):
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.get('/dashboard/api/notifications')
+@auth_required
+def api_notifications():
+    clear = request.args.get('clear') in ('1', 'true', 'yes', 'on')
+    items = []
+    try:
+        for instance in manager_json_list():
+            name = str(instance.get('name') or '').strip()
+            if not name:
+                continue
+            for item in dash_optimizer.get_vm_notifications(name, clear=clear):
+                enriched = dict(item)
+                enriched.setdefault('vmName', name)
+                items.append(enriched)
+        items.sort(key=lambda item: int(item.get('createdAt') or 0), reverse=True)
+        return jsonify({'ok': True, 'count': len(items), 'items': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.post('/dashboard/api/optimizer/activity/<name>')
 @auth_required
 def api_optimizer_activity(name):
@@ -3920,7 +4246,7 @@ def api_optimizer_logs():
 @app.post('/dashboard/api/optimizer/clean-system')
 @auth_required
 def api_optimizer_clean_system():
-    """Clean only explicitly labelled BlobeVM Docker resources."""
+    """Clean only explicitly labelled EpicVM Docker resources."""
     def worker():
         results = [
             _docker('container', 'prune', '-f', '--filter', 'label=com.blobevm.managed=1'),

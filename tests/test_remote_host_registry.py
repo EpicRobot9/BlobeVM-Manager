@@ -1,0 +1,449 @@
+import json
+import os
+import stat
+import sys
+from io import BytesIO
+from types import SimpleNamespace
+from urllib.error import HTTPError
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "dashboard"))
+
+from dashboard.remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, load_remote_host_configs
+from dashboard.remote_agent_client import RemoteAgentClient, RemoteAgentError, RemoteAgentHost
+from dashboard.vm_hosts import LocalDockerHost, VmHostUnavailable
+
+
+def test_load_configs_redacts_tokens_and_rejects_duplicate_ids(tmp_path):
+    path = tmp_path / "remote-hosts.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "hosts": [{
+            "id": "epic-pc",
+            "display_name": "Epic PC",
+            "platform": "windows",
+            "provider": "hyperv",
+            "agent_url": "http://100.72.220.117:8765",
+            "token": "secret-token",
+            "enabled": True,
+        }],
+    }))
+    path.chmod(0o600)
+
+    configs = load_remote_host_configs(path)
+    assert configs[0]["id"] == "epic-pc"
+    assert "token" in configs[0]
+
+    registry = ConfiguredVmHostRegistry(LocalDockerHost(manager="manager"), path)
+    public = registry.public_records()
+    remote = next(item for item in public if item["id"] == "epic-pc")
+    assert "token" not in remote
+    assert remote["provider"] == "hyperv"
+
+    path.write_text(json.dumps({
+        "version": 1,
+        "hosts": [
+            {"id": "same", "display_name": "A", "agent_url": "http://100.64.0.2:1", "token": "a"},
+            {"id": "same", "display_name": "B", "agent_url": "http://100.64.0.3:1", "token": "b"},
+        ],
+    }))
+    path.chmod(0o600)
+    with pytest.raises(RemoteHostConfigError, match="duplicate"):
+        load_remote_host_configs(path)
+
+
+def test_registry_marks_unreachable_host_offline_without_hiding_local(tmp_path):
+    path = tmp_path / "remote-hosts.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "hosts": [{
+            "id": "offline-pc",
+            "display_name": "Offline PC",
+            "agent_url": "http://100.64.0.2:8765",
+            "token": "secret-token",
+            "enabled": True,
+        }],
+    }))
+    path.chmod(0o600)
+    registry = ConfiguredVmHostRegistry(LocalDockerHost(manager="manager"), path)
+    registry._providers["offline-pc"].client = SimpleNamespace(
+        health=lambda: (_ for _ in ()).throw(RemoteAgentError("offline")),
+        capabilities=lambda: {},
+    )
+
+    records = registry.public_records()
+    assert any(item["id"] == "local" for item in records)
+    offline = next(item for item in records if item["id"] == "offline-pc")
+    assert offline["online"] is False
+    assert offline["capabilities"]["create_vm"] is False
+
+
+def test_registry_rejects_group_or_world_readable_secret_file(tmp_path):
+    path = tmp_path / "remote-hosts.json"
+    path.write_text(json.dumps({"hosts": []}))
+    path.chmod(0o644)
+
+    with pytest.raises(RemoteHostConfigError, match="group/world readable"):
+        load_remote_host_configs(path)
+
+
+def test_registry_rejects_invalid_timeout_without_startup_exception(tmp_path):
+    path = tmp_path / "remote-hosts.json"
+    path.write_text(json.dumps({
+        "hosts": [{
+            "id": "epic-pc",
+            "display_name": "Epic PC",
+            "agent_url": "http://100.64.0.2:8765",
+            "token": "secret-token",
+            "timeout": "not-a-number",
+        }],
+    }))
+    path.chmod(0o600)
+
+    with pytest.raises(RemoteHostConfigError, match="invalid timeout"):
+        load_remote_host_configs(path)
+
+
+def test_registry_persists_remote_inventory_cache_for_offline_cards(tmp_path):
+    path = tmp_path / "remote-hosts.json"
+    path.write_text(json.dumps({"hosts": []}))
+    path.chmod(0o600)
+    registry = ConfiguredVmHostRegistry(LocalDockerHost(manager="manager"), path)
+    registry.remember_inventory("epic-pc", [{"name": "alpha", "host_id": "epic-pc", "token": "must-not-persist"}])
+    assert stat.S_IMODE(registry.inventory_cache_path.stat().st_mode) == 0o600
+
+    reloaded = ConfiguredVmHostRegistry(LocalDockerHost(manager="manager"), path)
+    assert reloaded.cached_inventory("epic-pc") == [{"name": "alpha", "host_id": "epic-pc"}]
+
+
+def test_remote_agent_client_sends_token_and_parses_vm_list(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"vms": [{"name": "alpha", "state": "Running"}]}).encode()
+
+    def fake_open(req, timeout):
+        calls.append((req, timeout))
+        return FakeResponse()
+
+    client = RemoteAgentClient("http://100.64.0.2:8765", "token", opener=fake_open)
+    result = client.list_vms()
+    assert result == [{"name": "alpha", "state": "Running"}]
+    assert calls[0][0].get_header("Authorization") == "Bearer token"
+    assert calls[0][1] <= 3
+
+
+def test_remote_lifecycle_uses_explicit_agent_contract_routes():
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok": true, "vm": {"name": "alpha"}}'
+
+    def fake_open(req, timeout):
+        calls.append((req.get_method(), req.full_url))
+        return FakeResponse()
+
+    client = RemoteAgentClient("http://100.64.0.2:8765", "token", opener=fake_open)
+    client.lifecycle("start", "alpha")
+    client.lifecycle("delete", "alpha")
+
+    assert calls == [
+        ("POST", "http://100.64.0.2:8765/v1/vms/alpha/start"),
+        ("DELETE", "http://100.64.0.2:8765/v1/vms/alpha"),
+    ]
+
+
+def test_remote_mutations_send_idempotency_key_and_capture_request_id():
+    class FakeResponse:
+        status = 200
+        headers = {"X-Request-Id": "request-123"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    seen = []
+
+    def fake_open(req, timeout):
+        seen.append(req)
+        return FakeResponse()
+
+    result = RemoteAgentClient("http://100.64.0.2:8765", "token", opener=fake_open).lifecycle("start", "alpha")
+    assert seen[0].get_header("Idempotency-key")
+    assert result.request_id == "request-123"
+
+
+def test_remote_client_rejects_malformed_success_json():
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"not-json"
+
+    with pytest.raises(RemoteAgentError, match="invalid JSON"):
+        RemoteAgentClient(
+            "http://100.64.0.2:8765",
+            "token",
+            opener=lambda req, timeout: FakeResponse(),
+        ).health()
+
+
+def test_remote_client_normalizes_http_errors_without_unbound_request_state():
+    def fake_open(req, timeout):
+        raise HTTPError(
+            req.full_url,
+            404,
+            "not found",
+            {"X-Request-Id": "request-404"},
+            BytesIO(b'{"error": "missing"}'),
+        )
+
+    with pytest.raises(RemoteAgentError) as caught:
+        RemoteAgentClient("http://100.64.0.2:8765", "token", opener=fake_open).health()
+    assert caught.value.status == 404
+    assert "missing" in str(caught.value)
+
+
+def test_remote_capability_features_make_agent_eligible():
+    host = RemoteAgentHost({
+        "id": "epic-pc",
+        "display_name": "Epic PC",
+        "agent_url": "http://100.64.0.2:8765",
+        "token": "token",
+    })
+    host.client = SimpleNamespace(
+        health=lambda: {"ok": True},
+        capabilities=lambda: {
+            "ok": True,
+            "available": True,
+            "features": ["create", "lifecycle", "delete-owned"],
+        },
+    )
+
+    record = host.public_record()
+    assert record["online"] is True
+    assert record["capabilities"] == {
+        "create_vm": True,
+        "start": True,
+        "stop": True,
+        "restart": True,
+        "delete": True,
+        "console": False,
+    }
+
+
+def test_remote_unavailable_capabilities_are_not_eligible():
+    host = RemoteAgentHost({
+        "id": "epic-pc",
+        "display_name": "Epic PC",
+        "agent_url": "http://100.64.0.2:8765",
+        "token": "token",
+    })
+    host.client = SimpleNamespace(
+        health=lambda: {"ok": True},
+        capabilities=lambda: {"ok": True, "available": False, "features": ["create", "lifecycle"]},
+    )
+
+    assert host.public_record()["capabilities"]["create_vm"] is False
+
+
+def test_remote_host_lifecycle_errors_are_normalized(monkeypatch):
+    host = RemoteAgentHost({
+        "id": "epic-pc",
+        "display_name": "Epic PC",
+        "agent_url": "http://100.64.0.2:8765",
+        "token": "token",
+    })
+    host.client = SimpleNamespace(
+        lifecycle=lambda *args, **kwargs: (_ for _ in ()).throw(RemoteAgentError("offline")),
+    )
+    with pytest.raises(VmHostUnavailable):
+        host.run_manager("start", "alpha")
+
+
+def test_hosts_api_redacts_credentials_and_exposes_inventory(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+
+    class FakeRegistry:
+        config_error = ""
+
+        def refresh(self):
+            return None
+
+        def public_records(self):
+            return [{
+                "id": "epic-pc",
+                "display_name": "Epic PC",
+                "kind": "remote",
+                "provider": "hyperv",
+                "agent_url": "http://100.64.0.2:8765",
+                "token": "must-not-leak",
+                "online": True,
+                "capabilities": {"create_vm": True},
+            }]
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    response = module.app.test_client().get("/dashboard/api/hosts")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["hosts"][0]["id"] == "epic-pc"
+    assert "token" not in payload["hosts"][0]
+
+
+def test_remote_lifecycle_route_uses_selected_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+
+        def run_manager(self, action, name, **kwargs):
+            calls.append((action, name, kwargs))
+            return Result()
+
+        def check_call(self, action, name, **kwargs):
+            calls.append((action, name, kwargs))
+
+        def list_vms(self):
+            return [{"name": "alpha"}]
+
+    class FakeRegistry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            assert host_id == "epic-pc"
+            return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    response = module.app.test_client().post("/dashboard/api/start/alpha?host_id=epic-pc")
+    assert response.status_code == 200
+    assert calls and calls[0][0:2] == ("start", "alpha")
+
+
+def test_duplicate_remote_vm_names_fail_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+
+    class FakeHost:
+        kind = "remote"
+
+        def __init__(self, host_id, names):
+            self.host_id = host_id
+            self.host_name = host_id
+            self._names = names
+
+        def list_vms(self):
+            return [{"name": name} for name in self._names]
+
+    selected = FakeHost("epic-pc", ["alpha"])
+    other = FakeHost("other-pc", ["alpha"])
+
+    class FakeRegistry:
+        providers = {"local": object(), "epic-pc": selected, "other-pc": other}
+
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            return self.providers[host_id]
+
+        def cached_inventory(self, host_id):
+            return []
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    response = module.app.test_client().post("/dashboard/api/start/alpha?host_id=epic-pc")
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "ambiguous_vm_owner"
+
+
+def test_create_rechecks_remote_placement_and_capability(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+
+    class FakeRegistry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            assert host_id == "epic-pc"
+            return FakeHost()
+
+        def public_records(self):
+            return [{
+                "id": "epic-pc",
+                "online": False,
+                "capabilities": {"create_vm": False},
+            }]
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    response = module.app.test_client().post(
+        "/dashboard/api/create",
+        json={"name": "alpha", "placement": "remote", "host_id": "epic-pc"},
+    )
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "host_offline"
+
+    mismatch = module.app.test_client().post(
+        "/dashboard/api/create",
+        json={"name": "alpha", "placement": "local", "host_id": "epic-pc"},
+    )
+    assert mismatch.status_code == 400

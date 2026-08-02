@@ -1,4 +1,4 @@
-const API_BASE = '/dashboard/api'
+const API_BASE = '/Dashboard/api'
 const AUTH_BASE = '/Dashboard/api'
 
 export async function apiFetch(path, opts={}){

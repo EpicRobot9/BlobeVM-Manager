@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # optimizer-ensure.sh
-# Idempotent ensure script for BlobeVM Optimizer service.
+# Idempotent ensure script for EpicVM Optimizer service.
 # - Ensures Node.js is installed (via NodeSource for a modern LTS)
 # - Ensures optimizer files are present under /opt/blobe-vm
 # - Runs `npm install` if a package.json exists

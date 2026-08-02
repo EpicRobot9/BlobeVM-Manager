@@ -17,6 +17,7 @@ import threading
 import subprocess
 import re
 import shutil
+from runtime_stats import get_docker_stats
 
 STATE_DIR = os.environ.get('BLOBEDASH_STATE', '/opt/blobe-vm')
 LOG_DIR = '/var/blobe/logs/optimizer'
@@ -30,6 +31,7 @@ PROFILE_META_PATH = os.path.join(STATE_DIR, '.optimizer_profiles.json')
 HISTORY_META_PATH = os.path.join(STATE_DIR, '.optimizer_history.json')
 TREND_META_PATH = os.path.join(STATE_DIR, '.optimizer_trends.json')
 NOTIFICATION_META_DIR = os.path.join(STATE_DIR, '.optimizer_notifications')
+CPU_PRIORITY_META_PATH = os.path.join(STATE_DIR, '.optimizer_cpu_priority.json')
 
 DENSITY_PROFILES = {
     'single-user': {
@@ -89,6 +91,10 @@ DEFAULT_CFG = {
     'interactiveVmCpuBudgetPercent': 20,
     'gamingVmMemoryMb': 3072,
     'interactiveVmMemoryMb': 2048,
+    'activityCpuPriorityEnabled': False,
+    'activeCpuShares': 2048,
+    'warmCpuShares': 1024,
+    'idleCpuShares': 512,
 }
 
 
@@ -495,35 +501,23 @@ def gather_stats():
         fallback = _meminfo_stats()
         out['mem'] = fallback.get('mem') or {}
         out['swap'] = fallback.get('swap') or {}
-    # docker stats
     try:
-        d = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}'], text=True)
-        for l in d.splitlines():
-            if not l.strip():
-                continue
-            parts = l.split('|')
-            if len(parts) >= 4:
-                name = parts[0]
-                try:
-                    cpu = float(parts[1].strip().replace('%', ''))
-                except Exception:
-                    cpu = 0.0
-                try:
-                    memperc = float(parts[2].strip().replace('%', ''))
-                except Exception:
-                    memperc = 0.0
-                memusage = parts[3].strip()
-                m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
-                memBytes = 0
-                if m:
-                    n = float(m.group(1)); u = m.group(2).upper()
-                    mul = 1024
-                    if u.startswith('M'):
-                        mul = 1024*1024
-                    elif u.startswith('G'):
-                        mul = 1024*1024*1024
-                    memBytes = int(n * mul)
-                out['containers'].append({'name': name, 'cpu': cpu, 'memperc': memperc, 'memBytes': memBytes})
+        for record in get_docker_stats():
+            name = record['name']
+            cpu = record['cpu_percent']
+            memperc = record['mem_percent']
+            memusage = record['mem_usage']
+            m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
+            memBytes = 0
+            if m:
+                n = float(m.group(1)); u = m.group(2).upper()
+                mul = 1024
+                if u.startswith('M'):
+                    mul = 1024*1024
+                elif u.startswith('G'):
+                    mul = 1024*1024*1024
+                memBytes = int(n * mul)
+            out['containers'].append({'name': name, 'cpu': cpu, 'memperc': memperc, 'memBytes': memBytes})
     except Exception:
         pass
     return out
@@ -544,6 +538,125 @@ def enforce_strict_memory(cfg: dict):
                 log(f'docker update failed for {name} : {e}')
     except Exception as e:
         log(f'enforceStrictMemory error {e}')
+
+
+def _cpu_share_value(value, default):
+    """Return a safe Docker CPU-share value from potentially bad config input."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return min(262144, max(2, value))
+
+
+def _desired_cpu_shares(vm_states, cfg):
+    """Map valid running VM names to their configured activity-class shares."""
+    shares = {
+        'active': _cpu_share_value(cfg.get('activeCpuShares', DEFAULT_CFG['activeCpuShares']), DEFAULT_CFG['activeCpuShares']),
+        'warm': _cpu_share_value(cfg.get('warmCpuShares', DEFAULT_CFG['warmCpuShares']), DEFAULT_CFG['warmCpuShares']),
+        'idle': _cpu_share_value(cfg.get('idleCpuShares', DEFAULT_CFG['idleCpuShares']), DEFAULT_CFG['idleCpuShares']),
+    }
+    desired = {}
+    for state in vm_states or []:
+        name = str(state.get('name') or '')
+        activity_class = state.get('activityClass')
+        if (not state.get('running') or activity_class not in shares or
+                name in {'dashboard', 'traefik'} or
+                not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name)):
+            continue
+        desired[name] = shares[activity_class]
+    return dict(sorted(desired.items()))
+
+
+def _cpu_priority_metadata(data):
+    """Normalize current and legacy CPU-priority metadata."""
+    if not isinstance(data, dict):
+        return {'enabled': False, 'vms': {}}
+    current_format = isinstance(data.get('vms'), dict)
+    if current_format:
+        vms = data['vms']
+    else:
+        vms = {
+            name: {'share': value, 'containerId': None}
+            for name, value in data.items()
+            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', str(name))
+        }
+    return {'enabled': data.get('enabled') is True or (not current_format and bool(vms)), 'vms': vms}
+
+
+def _container_identity(name):
+    try:
+        identity = subprocess.check_output(
+            ['docker', 'inspect', '--format={{.ID}}', f'blobevm_{name}'],
+            text=True,
+        ).strip()
+        return identity or None
+    except Exception:
+        return None
+
+
+def _apply_cpu_priority(cfg, vm_states):
+    """Apply or safely reset activity CPU shares, tolerating Docker failures."""
+    try:
+        metadata = _cpu_priority_metadata(_read_json_file(CPU_PRIORITY_META_PATH, {}))
+        if cfg.get('activityCpuPriorityEnabled') is not True:
+            remaining = {}
+            for name, entry in metadata['vms'].items():
+                valid_name = isinstance(name, str) and re.fullmatch(
+                    r'[A-Za-z0-9][A-Za-z0-9_.-]*', name
+                )
+                valid_identity = (
+                    isinstance(entry, dict)
+                    and isinstance(entry.get('containerId'), str)
+                    and bool(entry['containerId'].strip())
+                )
+                if not valid_name or not valid_identity:
+                    remaining[name] = entry
+                    continue
+                identity = _container_identity(name)
+                if identity != entry['containerId']:
+                    remaining[name] = entry
+                    log(f'cpu priority reset skipped for {name}: container identity changed or unavailable')
+                    continue
+                try:
+                    subprocess.check_call([
+                        'docker', 'update', '--cpu-shares=1024', entry['containerId']
+                    ])
+                    log(f'cpu priority reset for {name} -> 1024 shares')
+                except Exception as e:
+                    remaining[name] = entry
+                    log(f'docker cpu priority reset failed for {name}: {e}')
+            if remaining:
+                _write_json_file(CPU_PRIORITY_META_PATH, {'enabled': False, 'vms': remaining})
+            else:
+                try:
+                    os.remove(CPU_PRIORITY_META_PATH)
+                except FileNotFoundError:
+                    pass
+            return {}
+
+        desired = _desired_cpu_shares(vm_states, cfg)
+        previous = metadata['vms']
+        applied = {}
+        for name, share in desired.items():
+            identity = _container_identity(name)
+            prior = previous.get(name) if isinstance(previous.get(name), dict) else {}
+            if (prior.get('share') == share and identity and
+                    prior.get('containerId') == identity):
+                applied[name] = {'share': share, 'containerId': identity}
+                continue
+            try:
+                subprocess.check_call(['docker', 'update', f'--cpu-shares={share}', f'blobevm_{name}'])
+                applied[name] = {'share': share, 'containerId': identity}
+                log(f'cpu priority for {name} -> {share} shares')
+            except Exception as e:
+                log(f'docker cpu priority update failed for {name}: {e}')
+        if applied or not desired:
+            _write_json_file(CPU_PRIORITY_META_PATH, {'enabled': True, 'vms': applied})
+        return {name: item['share'] for name, item in applied.items()}
+    except Exception as e:
+        log(f'cpu priority error: {e}')
+        return {}
 
 
 def _action_allowed(name: str, action: str, cooldown: int):
@@ -656,21 +769,13 @@ def _run_memory_guard(cfg, vm_state_map=None, host_pressure=None):
     vm_state_map = vm_state_map or {}
     host_pressure = host_pressure or {}
     try:
-        out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.MemPerc}} {{.MemUsage}}'], text=True)
-        for l in out.splitlines():
-            parts = l.strip().split()
-            if not parts:
-                continue
-            name = parts[0]
+        for record in get_docker_stats():
+            name = record['name']
             if not name.startswith('blobevm_'):
                 continue
             vm_name = name[len('blobevm_'):]
             vm_state = vm_state_map.get(vm_name)
-            percRaw = parts[1] if len(parts) > 1 else '0%'
-            try:
-                perc = float(percRaw.replace('%', ''))
-            except Exception:
-                perc = 0.0
+            perc = record['mem_percent']
             threshold = cfg.get('memoryThreshold', 60)
             if perc >= threshold:
                 if _is_vm_protected(vm_state):
@@ -694,21 +799,13 @@ def _run_cpu_guard(cfg, vm_state_map=None, host_pressure=None):
     vm_state_map = vm_state_map or {}
     host_pressure = host_pressure or {}
     try:
-        out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.CPUPerc}}'], text=True)
-        for l in out.splitlines():
-            parts = l.strip().split()
-            if not parts:
-                continue
-            name = parts[0]
+        for record in get_docker_stats():
+            name = record['name']
             if not name.startswith('blobevm_'):
                 continue
             vm_name = name[len('blobevm_'):]
             vm_state = vm_state_map.get(vm_name)
-            percRaw = parts[1] if len(parts) > 1 else '0%'
-            try:
-                perc = float(percRaw.replace('%', ''))
-            except Exception:
-                perc = 0.0
+            perc = record['cpu_percent']
             threshold = cfg.get('cpuThreshold', 70)
             if perc >= threshold:
                 if _is_vm_protected(vm_state):
@@ -746,17 +843,14 @@ def _run_swap_guard(cfg, vm_state_map=None, host_pressure=None):
                     relief['reason'] = 'swap-pressure-relief'
                     relief['perc'] = perc
                     return relief
-                stats = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}} {{.MemUsage}}'], text=True)
                 heaviest = None; maxBytes = 0
-                for l in stats.splitlines():
-                    p = l.strip().split()
-                    if not p: continue
-                    name = p[0]
+                for record in get_docker_stats():
+                    name = record['name']
                     if not name.startswith('blobevm_'): continue
                     vm_name = name[len('blobevm_'):]
                     if _is_vm_protected(vm_state_map.get(vm_name)):
                         continue
-                    usage = p[1] if len(p) > 1 else '0'
+                    usage = record['mem_usage']
                     m = re.search(r'([0-9.]+)([KMG]i?)B', usage)
                     bytes_ = 0
                     if m:
@@ -1219,6 +1313,7 @@ def run_once():
         pre_stats = gather_stats()
         host_pressure = _derive_host_pressure(pre_stats, cfg)
         vm_states = _derive_vm_states(cfg, pre_stats)
+        _apply_cpu_priority(cfg, vm_states)
         vm_state_map = _vm_state_map(vm_states)
         idle_shutdown = _stop_idle_inactive_vms(cfg, vm_states)
         if idle_shutdown:
