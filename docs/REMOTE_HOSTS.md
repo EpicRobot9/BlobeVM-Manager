@@ -14,6 +14,14 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\setup.ps1
 ```
 
+If the files are not already checked out, use the one-shot downloader from an
+elevated PowerShell 7 prompt:
+
+```powershell
+Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/remote_agent/windows/download-setup.ps1' -OutFile "$env:TEMP\EpicVM-RemoteVM-download.ps1"
+pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\EpicVM-RemoteVM-download.ps1"
+```
+
 The guided setup checks PowerShell 7, Hyper-V, and Tailscale, discovers the
 Tailscale address, asks for the optional Hyper-V switch, and runs the secure
 installer. For unattended setup, use `-TailscaleAddress`, `-SwitchName`, and

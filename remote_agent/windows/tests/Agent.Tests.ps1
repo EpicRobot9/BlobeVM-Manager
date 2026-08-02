@@ -125,4 +125,13 @@ Describe 'EpicVM agent binding defaults' {
         $setup | Should -Match 'SwitchName'
         $setup | Should -Match 'install.ps1'
     }
+
+    It 'ships a downloader that invokes guided setup' {
+        $downloadPath = Join-Path $windowsRoot 'download-setup.ps1'
+        Test-Path -LiteralPath $downloadPath | Should -BeTrue
+        $download = Get-Content -LiteralPath $downloadPath -Raw
+        $download | Should -Match 'Invoke-WebRequest'
+        $download | Should -Match 'setup.ps1'
+        $download | Should -Match 'RemoteVM'
+    }
 }

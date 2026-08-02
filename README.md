@@ -58,14 +58,24 @@ The dashboard is a VM management UI served at `/dashboard` (and, for the modern 
 
 EpicVM can place a VM on a Windows host running Hyper-V through the RemoteVM agent. The server stores host records in a root-owned JSON file (override with `EPICVM_REMOTE_HOSTS_FILE`) and the dashboard exposes only redacted host metadata.
 
-On the Windows host, install the agent from `remote_agent/windows` in an elevated PowerShell 7 prompt:
+On the Windows host, use the one-shot downloader from an elevated PowerShell 7 prompt:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\\install.ps1 -TailscaleAddress 100.64.12.34
+Invoke-WebRequest `
+  -Uri 'https://raw.githubusercontent.com/EpicRobot9/BlobeVM-Manager/main/remote_agent/windows/download-setup.ps1' `
+  -OutFile "$env:TEMP\EpicVM-RemoteVM-download.ps1"
+pwsh -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\EpicVM-RemoteVM-download.ps1"
 ```
 
-The installer creates the `EpicVMRemoteAgent` service, stores the enrollment credential in a protected token file without printing it, binds it to the specific Tailscale address, performs a local health check, and limits the Windows Firewall rule to Tailscale's `100.64.0.0/10` range. Transfer the protected token file securely and enroll it with `epicvm-remote-host add ... --token-file <path>`. See [remote_agent/windows/README.md](remote_agent/windows/README.md) for the API and ownership-safety rules.
+It downloads the required agent files and automatically launches the guided
+`setup.ps1` flow. If the files are already checked out locally, run
+`remote_agent/windows/setup.ps1` directly. The installer creates the
+`EpicVMRemoteAgent` service, stores the enrollment credential in a protected token
+file without printing it, binds it to the specific Tailscale address, performs a
+local health check, and limits the Windows Firewall rule to Tailscale's
+`100.64.0.0/10` range. Transfer the protected token file securely, then run
+`sudo epicvm-remote-host setup` on the server. See [remote_agent/windows/README.md](remote_agent/windows/README.md)
+for the API and ownership-safety rules.
 
 Enroll the host on the EpicVM server without exposing the bearer token. Generate a protected token file first, then consume it during enrollment; `list` and `show` remain redacted:
 
