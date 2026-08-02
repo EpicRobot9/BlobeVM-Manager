@@ -14,8 +14,13 @@ New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'providers') -Force |
 New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'logs') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'vms') -Force | Out-Null
 
-$tokenPath = Join-Path $InstallRoot 'agent.token'
+$tokenPath = Join-Path $InstallRoot 'agent.txt'
+$legacyTokenPath = Join-Path $InstallRoot 'agent.token'
 if (Test-Path -LiteralPath $tokenPath) {
+    $token = (Get-Content -LiteralPath $tokenPath -Raw -Encoding UTF8).Trim()
+}
+elseif (Test-Path -LiteralPath $legacyTokenPath) {
+    $tokenPath = $legacyTokenPath
     $token = (Get-Content -LiteralPath $tokenPath -Raw -Encoding UTF8).Trim()
 }
 else {

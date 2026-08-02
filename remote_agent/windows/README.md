@@ -26,11 +26,12 @@ The lower-level installer remains available:
 .\install.ps1 -TailscaleAddress 100.72.220.117
 ```
 
-The installer writes the enrollment credential to the protected `agent.token`
-file and never prints it. Transfer that file through an approved secure channel
-to the EpicVM server, then run `sudo epicvm-remote-host setup`. The server wizard
+The installer writes the enrollment credential to the protected `agent.txt`
+file for new installations and never prints it. Existing installations using
+`agent.token` remain supported. Transfer that file through an approved secure
+channel to the EpicVM server, then run `sudo epicvm-remote-host setup`. The server wizard
 asks for the host details, enrolls the protected token file, and probes the agent.
-It stores the real token under `C:\ProgramData\EpicVM\agent\agent.token`,
+It stores the real token under `C:\ProgramData\EpicVM\agent\agent.txt` for new installs,
 creates the `EpicVMRemoteAgent` service, and opens TCP/8765 only for
 `100.64.0.0/10` (Tailscale's CGNAT range). The listener binds only to the
 supplied Tailscale address; wildcard binding is refused. Set `SwitchName` in the
@@ -40,7 +41,7 @@ virtual switch.
 A quick local check is:
 
 ```powershell
-Invoke-RestMethod -Headers @{ Authorization = "Bearer $(Get-Content C:\ProgramData\EpicVM\agent\agent.token)" } http://127.0.0.1:8765/v1/capabilities
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $(Get-Content C:\ProgramData\EpicVM\agent\agent.txt)" } http://127.0.0.1:8765/v1/capabilities
 ```
 
 The service exposes:
