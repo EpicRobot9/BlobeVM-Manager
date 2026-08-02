@@ -83,7 +83,11 @@ if (-not [string]::IsNullOrWhiteSpace($SwitchName)) {
 }
 
 Write-Host "`nSetup complete." -ForegroundColor Green
-Write-Host "Protected token file: $(Join-Path $InstallRoot 'agent.token')"
+$tokenPath = Join-Path $InstallRoot 'agent.txt'
+if (-not (Test-Path -LiteralPath $tokenPath)) {
+    $tokenPath = Join-Path $InstallRoot 'agent.token'
+}
+Write-Host "Protected token file: $tokenPath"
 Write-Host 'Next: transfer that protected file privately to the EpicVM server.'
 Write-Host 'Then run: sudo epicvm-remote-host setup'
 Write-Host 'The server wizard will ask for the host details and probe the agent.'

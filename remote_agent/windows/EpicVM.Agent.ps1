@@ -28,7 +28,7 @@ function Get-EpicVMDefaultConfig {
         BindAddress = '127.0.0.1'
         Port = 8765
         Provider = 'HyperV'
-        TokenFile = 'C:\ProgramData\EpicVM\agent\agent.token'
+        TokenFile = 'C:\ProgramData\EpicVM\agent\agent.txt'
         ConfigFile = 'C:\ProgramData\EpicVM\agent\config.json'
         VmRoot = 'C:\ProgramData\EpicVM\vms'
         SwitchName = ''

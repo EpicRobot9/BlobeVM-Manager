@@ -2,7 +2,7 @@
   "BindAddress": "100.64.0.10",
   "Port": 8765,
   "Provider": "HyperV",
-  "TokenFile": "C:\\ProgramData\\EpicVM\\agent\\agent.token",
+  "TokenFile": "C:\\ProgramData\\EpicVM\\agent\\agent.txt",
   "VmRoot": "C:\\ProgramData\\EpicVM\\vms",
   "SwitchName": "",
   "DefaultMemoryBytes": 4294967296,
