@@ -321,6 +321,63 @@ def test_remote_host_lifecycle_errors_are_normalized(monkeypatch):
         host.run_manager("start", "alpha")
 
 
+def test_remote_vm_url_includes_public_origin_and_host_id(monkeypatch):
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+    monkeypatch.setattr(module, "_external_base_url", lambda: "https://techexplore.us")
+    assert module._build_vm_url("testre", host_id="epic-pc") == (
+        "https://techexplore.us/vm/testre/?host_id=epic-pc"
+    )
+
+
+def test_remote_inventory_gets_public_vm_link(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    module = importlib.import_module("dashboard.app")
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+
+        def list_vms(self):
+            return [{"name": "testre", "state": "Running"}]
+
+        def normalize_inventory(self, instances):
+            return [
+                {
+                    **item,
+                    "placement": "remote",
+                    "host_id": self.host_id,
+                    "host_name": self.host_name,
+                }
+                for item in instances
+            ]
+
+    class FakeRegistry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            assert host_id == "epic-pc"
+            return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    with module.app.test_request_context(
+        "/dashboard/api/list",
+        headers={
+            "Host": "techexplore.us",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "techexplore.us",
+        },
+    ):
+        items = module.manager_json_list("epic-pc")
+
+    assert items[0]["url"] == "https://techexplore.us/vm/testre/?host_id=epic-pc"
+
+
 def test_hosts_api_redacts_credentials_and_exposes_inventory(monkeypatch, tmp_path):
     monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
     monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))

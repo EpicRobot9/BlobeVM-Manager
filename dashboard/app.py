@@ -3,7 +3,7 @@ import os, json, subprocess, shlex, base64, socket, threading, time, sqlite3, se
 import shutil
 import re
 from urllib import request as urlrequest, error as urlerror
-from urllib.parse import urlparse
+from urllib.parse import quote as url_quote, urlparse
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file, redirect
 import optimizer as dash_optimizer
@@ -1651,11 +1651,13 @@ def _build_vm_embed_url(name: str) -> str:
     return f"{root}/vnc/index.html?autoconnect=1&resize=remote&clipboard_up=true&clipboard_down=true&clipboard_seamless=true&show_control_bar=true&path=/vmraw/{name}/websockify"
 
 
-def _build_vm_url(name: str) -> str:
-    """Best-effort VM URL appropriate for the current mode, for browser-origin host.
-    Prefer the wrapper route on the current dashboard host so users land on /vm/<name>/
-    with the overlay UI instead of raw runtime endpoints.
-    """
+def _build_vm_url(name: str, host_id: str | None = None) -> str:
+    """Build a browser URL for a local VM or a host-qualified RemoteVM."""
+    if host_id and host_id != 'local':
+        prefix = _vm_path_prefix(name)
+        base = _external_base_url()
+        root = f'{base}{prefix}' if base else prefix
+        return f'{root}/?host_id={url_quote(str(host_id), safe="")}'
     if _is_direct_mode():
         host = _request_host()
         if not host:
@@ -1685,6 +1687,9 @@ def manager_json_list(host_id=None):
             # A remote provider owns its inventory; never fall back to the
             # dashboard server's local instance directory for an empty result.
             normalized = host_provider.normalize_inventory(instances)
+            for item in normalized:
+                if item.get('name'):
+                    item['url'] = _build_vm_url(item['name'], host_id=host_id)
             if hasattr(VM_HOST_REGISTRY, 'remember_inventory'):
                 try:
                     VM_HOST_REGISTRY.remember_inventory(host_id, normalized)
@@ -1731,6 +1736,8 @@ def manager_json_list(host_id=None):
                 for item in cached:
                     item['host_online'] = False
                     item['status'] = 'offline'
+                    if item.get('name'):
+                        item['url'] = _build_vm_url(item['name'], host_id=host_id)
                 return cached
             raise
     except Exception:
@@ -2649,7 +2656,55 @@ def dashboard_vm_wrapper(name):
         # Public wrapper page that opens the VM inside an iframe while setting the tab title and favicon.
         # We render a small client-side React app that will show either the iframe (when VM is running)
         # or a full-screen fallback UI when the VM is stopped/unreachable.
-        url = _build_vm_embed_url(name) or ''
+        host_id = str(request.args.get('host_id') or 'local').strip().lower()
+        is_remote_wrapper = host_id != 'local'
+        if is_remote_wrapper:
+                try:
+                        remote_host = _vm_host(host_id)
+                        _ensure_remote_vm_exists(remote_host, name)
+                        remote_status_fn = getattr(remote_host, 'status', None)
+                        if not callable(remote_status_fn):
+                                raise RuntimeError('selected remote host does not support status')
+                        remote_response = remote_status_fn(name)
+                        remote_vm = remote_response.get('vm') if isinstance(remote_response, dict) else {}
+                        remote_vm = remote_vm if isinstance(remote_vm, dict) else {}
+                        remote_state = str(remote_vm.get('state') or remote_vm.get('status') or 'unknown')
+                        remote_running = remote_state.lower() in {'running', 'on', 'poweredon', 'started'}
+                        initial_status = {
+                                'ok': bool(remote_response.get('ok', True)) if isinstance(remote_response, dict) else True,
+                                'name': name,
+                                'url': '',
+                                'exists': bool(remote_vm),
+                                'running': remote_running,
+                                'healthy': remote_running,
+                                'state': remote_state,
+                                'status': str(remote_vm.get('status') or remote_state),
+                                'detail': str(remote_vm.get('status') or remote_state),
+                                'crashed': False,
+                                'host_id': host_id,
+                                'placement': 'remote',
+                                'consoleAvailable': False,
+                        }
+                except Exception as exc:
+                        initial_status = {
+                                'ok': False,
+                                'name': name,
+                                'url': '',
+                                'exists': False,
+                                'running': False,
+                                'healthy': False,
+                                'state': 'unavailable',
+                                'status': 'RemoteVM unavailable',
+                                'detail': str(exc)[:300],
+                                'crashed': False,
+                                'host_id': host_id,
+                                'placement': 'remote',
+                                'consoleAvailable': False,
+                        }
+                url = ''
+        else:
+                url = _build_vm_embed_url(name) or ''
+                initial_status = _vm_status_payload(name)
         cfg = _load_dashboard_settings()
         vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
         title = vm_titles.get(name) or f"EpicVM - {name}"
@@ -2670,7 +2725,7 @@ def dashboard_vm_wrapper(name):
                 js_fav = json.dumps(fav_url)
                 js_url = json.dumps(url)
                 js_name = json.dumps(name)
-                js_status = json.dumps(_vm_status_payload(name))
+                js_status = json.dumps(initial_status)
         except Exception:
                 js_title = '"%s"' % (title.replace('"','\"'))
                 js_fav = '"%s"' % (fav_url.replace('"','\"'))
