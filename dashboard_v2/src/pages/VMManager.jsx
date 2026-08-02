@@ -708,7 +708,7 @@ export default function VMManager(){
           <div className="vm-create-fields" style={{marginTop:14}}>
             <label className="vm-placement-field">
               <span>Host ID</span>
-              <input value={enrollmentDraft.hostId} onChange={e=>setEnrollmentDraft(s=>({ ...s, hostId:e.target.value }))} placeholder="epic-pc" pattern="[a-z0-9][a-z0-9._-]{0,62}" required />
+              <input value={enrollmentDraft.hostId} onChange={e=>setEnrollmentDraft(s=>({ ...s, hostId:e.target.value }))} placeholder="epic-pc" pattern="[a-z0-9][a-z0-9._\-]{0,62}" required />
             </label>
             <label className="vm-placement-field">
               <span>Display name</span>
@@ -730,7 +730,7 @@ export default function VMManager(){
           <div className="vm-create-fields">
             <label className="vm-placement-field vm-name-field">
               <span>VM name</span>
-              <input value={createName} onChange={e=>setCreateName(e.target.value)} placeholder="new vm name (e.g. alpha)" pattern="[a-z0-9][a-z0-9._-]{0,62}" required />
+              <input value={createName} onChange={e=>setCreateName(e.target.value)} placeholder="new vm name (e.g. alpha)" pattern="[a-z0-9][a-z0-9._\-]{0,62}" required />
             </label>
             <label className="vm-placement-field">
               <span>VM location</span>
