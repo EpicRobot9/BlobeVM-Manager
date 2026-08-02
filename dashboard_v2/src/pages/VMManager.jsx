@@ -134,6 +134,10 @@ export default function VMManager(){
   const [manageDraft, setManageDraft] = useState({ title:'', hostOverride:'', faviconUrl:'', accessMode:'public', assignedUsers:[] })
   const [manageBusy, setManageBusy] = useState(false)
   const [faviconFile, setFaviconFile] = useState(null)
+  const [enrollmentDraft, setEnrollmentDraft] = useState({ hostId:'', displayName:'', agentUrl:'' })
+  const [enrollmentFile, setEnrollmentFile] = useState(null)
+  const [enrollmentBusy, setEnrollmentBusy] = useState(false)
+  const enrollmentFileInputRef = useRef(null)
   const prevStatsRef = useRef({})
   const lastAnnounceRef = useRef({})
   const didLoadOnceRef = useRef(false)
@@ -389,6 +393,31 @@ export default function VMManager(){
     }
     setBusyAction('')
     setTimeout(()=>load({ silent:true }), 800)
+  }
+
+  async function enrollRemoteHost(e){
+    e?.preventDefault?.()
+    if(!enrollmentFile) return
+    setEnrollmentBusy(true)
+    try{
+      const form = new FormData()
+      form.append('host_id', enrollmentDraft.hostId)
+      form.append('display_name', enrollmentDraft.displayName)
+      form.append('agent_url', enrollmentDraft.agentUrl)
+      form.append('token_file', enrollmentFile)
+      const res = await apiFetch('/remote-hosts/enroll', { method:'POST', body:form })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false) throw new Error(body.error || 'RemoteVM enrollment failed')
+      addToast({ title:'RemoteVM connected', message:`${body.host?.display_name || enrollmentDraft.displayName} is now available`, type:'success', timeout:6000 })
+      setEnrollmentDraft({ hostId:'', displayName:'', agentUrl:'' })
+      setEnrollmentFile(null)
+      if(enrollmentFileInputRef.current) enrollmentFileInputRef.current.value = ''
+      await load({ silent:true })
+    }catch(err){
+      addToast({ title:'RemoteVM enrollment failed', message:String(err), type:'error', timeout:9000 })
+    }finally{
+      setEnrollmentBusy(false)
+    }
   }
 
   async function createVm(e){
@@ -667,6 +696,35 @@ export default function VMManager(){
           <div style={{color:'var(--muted)', maxWidth:640}}>Use the create form to spin up new VMs. Each VM card now also has a Manage flow for deleting the VM, changing its custom domain/host override, tab title, and favicon.</div>
           <Button onClick={()=>load({ silent:true })}>Refresh</Button>
         </div>
+
+        <form onSubmit={enrollRemoteHost} className="glass-card" style={{marginTop:16, padding:18}}>
+          <div style={{display:'flex', justifyContent:'space-between', gap:12, alignItems:'baseline', flexWrap:'wrap'}}>
+            <div>
+              <h2 style={{margin:'0 0 6px'}}>Connect a RemoteVM host</h2>
+              <div style={{color:'var(--muted)', maxWidth:760}}>Upload the protected Windows agent token directly through this authenticated dashboard. The token is stored server-side and is never returned to the browser.</div>
+            </div>
+            <div className="vm-meta-chip">Tailscale only</div>
+          </div>
+          <div className="vm-create-fields" style={{marginTop:14}}>
+            <label className="vm-placement-field">
+              <span>Host ID</span>
+              <input value={enrollmentDraft.hostId} onChange={e=>setEnrollmentDraft(s=>({ ...s, hostId:e.target.value }))} placeholder="epic-pc" pattern="[a-z0-9][a-z0-9._-]{0,62}" required />
+            </label>
+            <label className="vm-placement-field">
+              <span>Display name</span>
+              <input value={enrollmentDraft.displayName} onChange={e=>setEnrollmentDraft(s=>({ ...s, displayName:e.target.value }))} placeholder="Epic Windows PC" required />
+            </label>
+            <label className="vm-placement-field">
+              <span>Tailscale agent URL</span>
+              <input value={enrollmentDraft.agentUrl} onChange={e=>setEnrollmentDraft(s=>({ ...s, agentUrl:e.target.value }))} placeholder="http://100.64.x.x:8765" required />
+            </label>
+            <label className="vm-placement-field">
+              <span>Protected token file</span>
+              <input ref={enrollmentFileInputRef} type="file" accept=".token,.txt,text/plain" onChange={e=>setEnrollmentFile(e.target.files?.[0] || null)} required />
+            </label>
+            <Button type="submit" disabled={enrollmentBusy || !enrollmentFile}>{enrollmentBusy ? 'Uploading…' : 'Upload and connect'}</Button>
+          </div>
+        </form>
 
         <form onSubmit={createVm} className="vm-create-form">
           <div className="vm-create-fields">
