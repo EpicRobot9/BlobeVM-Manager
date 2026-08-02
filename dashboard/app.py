@@ -97,6 +97,14 @@ def check_auth(header: str) -> bool:
 def admin_auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            response = Response(status=204)
+            if _same_origin_request():
+                response.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', request.host_url.rstrip('/'))
+                response.headers['Access-Control-Allow-Credentials'] = 'true'
+                response.headers['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Requested-With'
+            return response
         if _allow_insecure_dashboard():
             return fn(*args, **kwargs)
         user, password = _admin_credentials()
@@ -3147,7 +3155,7 @@ def api_hosts():
         return jsonify({'ok': False, 'hosts': [], 'error': str(exc)}), 500
 
 
-@app.post('/dashboard/api/remote-hosts/enroll')
+@app.route('/dashboard/api/remote-hosts/enroll', methods=['POST', 'OPTIONS'], provide_automatic_options=False)
 @auth_required
 def api_remote_host_enroll():
     """Enroll or replace a RemoteVM host from an authenticated dashboard upload."""
