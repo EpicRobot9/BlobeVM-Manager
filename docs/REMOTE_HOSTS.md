@@ -27,10 +27,11 @@ Tailscale address, asks for the optional Hyper-V switch, and runs the secure
 installer. For unattended setup, use `-TailscaleAddress`, `-SwitchName`, and
 `-NonInteractive`.
 
-3. Transfer the protected token file to the EpicVM server through a private
-channel. Keep it mode `0600`, then run `sudo epicvm-remote-host setup`. The
-server wizard prompts for the host ID, display name, Tailscale agent URL, and
-protected token-file path, then probes the agent.
+3. After the service is healthy, open `/Dashboard/` and use the **Connect a
+RemoteVM host** card. Enter the host ID, display name, and Tailscale agent URL,
+then select the protected token file. The authenticated upload writes the token
+directly to the server registry and never returns it to the browser. `sudo
+`epicvm-remote-host setup` remains available for CLI-only enrollment.
 
 ## Server enrollment
 

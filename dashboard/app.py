@@ -12,10 +12,10 @@ import hmac, hashlib, time, base64
 from branding import PRODUCT_NAME, DASHBOARD_TITLE, MANAGER_NAME, AUTH_REALM
 try:
     from .vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
-    from .remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record
+    from .remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
 except ImportError:
     from vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
-    from remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record
+    from remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
 try:
     import psutil
 except Exception:
@@ -3145,6 +3145,44 @@ def api_hosts():
         return jsonify(payload)
     except RemoteHostConfigError as exc:
         return jsonify({'ok': False, 'hosts': [], 'error': str(exc)}), 500
+
+
+@app.post('/dashboard/api/remote-hosts/enroll')
+@auth_required
+def api_remote_host_enroll():
+    """Enroll or replace a RemoteVM host from an authenticated dashboard upload."""
+    if request.content_length and request.content_length > 32768:
+        return jsonify({'ok': False, 'error': 'Enrollment payload is too large'}), 413
+    try:
+        host_id = str(request.form.get('host_id', '')).strip().lower()
+        display_name = str(request.form.get('display_name', '')).strip()
+        agent_url = str(request.form.get('agent_url', '')).strip()
+        token_upload = request.files.get('token_file')
+        if token_upload is not None:
+            token_bytes = token_upload.stream.read(4097)
+            if len(token_bytes) > 4096:
+                return jsonify({'ok': False, 'error': 'Token file is too large'}), 413
+            token = token_bytes.decode('utf-8').strip()
+        else:
+            token = str(request.form.get('token', '')).strip()
+        if not token or any(char.isspace() for char in token):
+            return jsonify({'ok': False, 'error': 'A single-line agent token file is required'}), 400
+        record = upsert_remote_host_config({
+            'id': host_id,
+            'display_name': display_name,
+            'agent_url': agent_url,
+            'token': token,
+            'provider': 'hyperv',
+            'platform': 'windows',
+        }, VM_HOST_REGISTRY.path)
+        VM_HOST_REGISTRY.refresh(force=True)
+        return jsonify({'ok': True, 'host': redact_host_record(record)}), 201
+    except UnicodeDecodeError:
+        return jsonify({'ok': False, 'error': 'Token file must be UTF-8 text'}), 400
+    except RemoteHostConfigError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except OSError:
+        return jsonify({'ok': False, 'error': 'Unable to store remote host enrollment'}), 500
 
 
 @app.get('/dashboard/api/overview')

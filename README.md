@@ -77,14 +77,11 @@ local health check, and limits the Windows Firewall rule to Tailscale's
 `sudo epicvm-remote-host setup` on the server. See [remote_agent/windows/README.md](remote_agent/windows/README.md)
 for the API and ownership-safety rules.
 
-Enroll the host on the EpicVM server without exposing the bearer token. Generate a protected token file first, then consume it during enrollment; `list` and `show` remain redacted:
-
-```bash
-epicvm-remote-host --registry /opt/blobe-vm/remote-hosts.json token-generate --output /run/epicvm/agent.token
-epicvm-remote-host --registry /opt/blobe-vm/remote-hosts.json \\
-  add win-gaming "Windows Gaming PC" http://100.64.12.34:8765 --token-file /run/epicvm/agent.token
-epicvm-remote-host --registry /opt/blobe-vm/remote-hosts.json list
-```
+After the Windows installer completes, open `/Dashboard/` and use **Connect a
+RemoteVM host**. Enter the host ID, display name, Tailscale agent URL, and select
+the protected token file. The authenticated dashboard upload stores the token
+server-side; it is not returned to the browser. The CLI wizard remains available
+as a fallback with `sudo epicvm-remote-host setup`.
 
 Only Tailscale `100.64.0.0/10` addresses and `*.ts.net` names are accepted by default. The development-only `EPICVM_ALLOW_NON_TAILSCALE_HOSTS=1` override should not be used on a public server.
 

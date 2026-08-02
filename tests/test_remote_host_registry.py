@@ -326,7 +326,60 @@ def test_hosts_api_redacts_credentials_and_exposes_inventory(monkeypatch, tmp_pa
     assert "token" not in payload["hosts"][0]
 
 
-def test_remote_lifecycle_route_uses_selected_host(monkeypatch, tmp_path):
+
+
+def test_authenticated_dashboard_enrollment_uploads_token_without_returning_it(monkeypatch, tmp_path):
+    import base64
+    import importlib
+    import io
+    import json
+    import stat
+
+    monkeypatch.setenv("BLOBEDASH_USER", "admin")
+    monkeypatch.setenv("BLOBEDASH_PASS", "password")
+    monkeypatch.setenv("DASH_V2_SECRET", "test-secret")
+    monkeypatch.delenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", raising=False)
+    module = importlib.import_module("dashboard.app")
+    registry_path = tmp_path / "remote-hosts.json"
+    module.VM_HOST_REGISTRY.path = registry_path
+    module.VM_HOST_REGISTRY._loaded_signature = None
+    auth = "Basic " + base64.b64encode(b"admin:password").decode()
+    response = module.app.test_client().post(
+        "/dashboard/api/remote-hosts/enroll",
+        headers={"Authorization": auth},
+        data={
+            "host_id": "epic-pc",
+            "display_name": "Epic PC",
+            "agent_url": "http://100.64.0.2:8765",
+            "token_file": (io.BytesIO(b"secret-token\n"), "agent.token"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert "token" not in payload
+    assert "secret-token" not in json.dumps(payload)
+    assert stat.S_IMODE(registry_path.stat().st_mode) == 0o600
+    assert json.loads(registry_path.read_text())[0]["token"] == "secret-token"
+
+
+def test_remote_host_enrollment_rejects_unauthenticated_upload(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.delenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", raising=False)
+    monkeypatch.setenv("BLOBEDASH_USER", "admin")
+    monkeypatch.setenv("BLOBEDASH_PASS", "password")
+    monkeypatch.setenv("DASH_V2_SECRET", "test-secret")
+    module = importlib.import_module("dashboard.app")
+    module.VM_HOST_REGISTRY.path = tmp_path / "remote-hosts.json"
+    response = module.app.test_client().post(
+        "/dashboard/api/remote-hosts/enroll",
+        data={"host_id": "epic-pc", "token": "secret-token"},
+    )
+    assert response.status_code == 401
+    assert not module.VM_HOST_REGISTRY.path.exists()
+
     monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
     monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
     import importlib
