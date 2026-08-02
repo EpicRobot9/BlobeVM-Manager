@@ -405,7 +405,7 @@ export default function VMManager(){
       form.append('display_name', enrollmentDraft.displayName)
       form.append('agent_url', enrollmentDraft.agentUrl)
       form.append('token_file', enrollmentFile)
-      const res = await apiFetch('/remote-hosts/enroll', { method:'POST', body:form })
+      const res = await apiFetch('/hosts/enroll', { method:'POST', body:form })
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false) throw new Error(body.error || 'RemoteVM enrollment failed')
       addToast({ title:'RemoteVM connected', message:`${body.host?.display_name || enrollmentDraft.displayName} is now available`, type:'success', timeout:6000 })

@@ -5,7 +5,7 @@ import test from 'node:test'
 const source = fs.readFileSync(new URL('../src/pages/VMManager.jsx', import.meta.url), 'utf8')
 
 test('VM manager exposes authenticated RemoteVM token-file enrollment', () => {
-  assert.match(source, /remote-hosts\/enroll/)
+  assert.match(source, /hosts\/enroll/)
   assert.match(source, /FormData/)
   assert.match(source, /token_file/)
   assert.match(source, /RemoteVM host/)

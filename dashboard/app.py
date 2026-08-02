@@ -3155,6 +3155,7 @@ def api_hosts():
         return jsonify({'ok': False, 'hosts': [], 'error': str(exc)}), 500
 
 
+@app.route('/dashboard/api/hosts/enroll', methods=['POST', 'OPTIONS'], provide_automatic_options=False)
 @app.route('/dashboard/api/remote-hosts/enroll', methods=['POST', 'OPTIONS'], provide_automatic_options=False)
 @auth_required
 def api_remote_host_enroll():
