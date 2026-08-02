@@ -51,6 +51,7 @@ class RemoteAgentClient:
         self.base_url = str(base_url).rstrip("/") + "/"
         self.token = str(token)
         self.timeout = max(0.5, float(timeout))
+        self.operation_timeout = max(self.timeout, 120.0)
         self._opener = opener or urlopen
 
     def _request(
@@ -60,6 +61,7 @@ class RemoteAgentClient:
         payload: Mapping[str, Any] | None = None,
         *,
         idempotency_key: str | None = None,
+        timeout: float | None = None,
     ) -> Any:
         url = urljoin(self.base_url, path.lstrip("/"))
         body = None
@@ -74,7 +76,7 @@ class RemoteAgentClient:
             headers["Content-Type"] = "application/json"
         request = Request(url, data=body, headers=headers, method=method.upper())
         try:
-            with self._opener(request, timeout=self.timeout) as response:
+            with self._opener(request, timeout=timeout if timeout is not None else self.timeout) as response:
                 raw = response.read()
                 status = int(getattr(response, "status", 200))
                 response_headers = getattr(response, "headers", None)
@@ -160,6 +162,7 @@ class RemoteAgentClient:
             "/v1/vms",
             payload,
             idempotency_key=idempotency_key or uuid.uuid4().hex,
+            timeout=self.operation_timeout,
         )
         return self._result(result)
 
@@ -170,13 +173,14 @@ class RemoteAgentClient:
             raise RemoteAgentError(f"unsupported remote VM action: {action}")
         request_key = idempotency_key or uuid.uuid4().hex
         if action == "delete":
-            result = self._request("DELETE", f"/v1/vms/{safe_name}", idempotency_key=request_key)
+            result = self._request("DELETE", f"/v1/vms/{safe_name}", idempotency_key=request_key, timeout=self.operation_timeout)
         else:
             result = self._request(
                 "POST",
                 f"/v1/vms/{safe_name}/{action}",
                 options or {},
                 idempotency_key=request_key,
+                timeout=self.operation_timeout,
             )
         return self._result(result)
 
