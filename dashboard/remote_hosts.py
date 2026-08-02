@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
@@ -91,28 +92,22 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any]:
     return record
 
 
-def load_remote_host_configs(path: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:
+def _read_all_remote_host_configs(path: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:
     config_path = remote_hosts_path(path)
     if not config_path.exists():
         return []
     try:
         mode = stat.S_IMODE(config_path.stat().st_mode)
-    except OSError as exc:
-        raise RemoteHostConfigError(f"cannot stat remote host registry: {exc}") from exc
-    if mode & 0o077:
-        raise RemoteHostConfigError("remote host registry must not be group/world readable")
-    try:
+        if mode & 0o077:
+            raise RemoteHostConfigError("remote host registry must not be group/world readable")
         data = json.loads(config_path.read_text(encoding="utf-8"))
+    except RemoteHostConfigError:
+        raise
     except OSError as exc:
         raise RemoteHostConfigError(f"cannot read remote host registry: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise RemoteHostConfigError(f"invalid remote host registry JSON: {exc}") from exc
-    if isinstance(data, list):
-        raw_hosts = data
-    elif isinstance(data, dict):
-        raw_hosts = data.get("hosts", [])
-    else:
-        raise RemoteHostConfigError("remote host registry must be an object or list")
+    raw_hosts = data if isinstance(data, list) else data.get("hosts", []) if isinstance(data, dict) else None
     if not isinstance(raw_hosts, list):
         raise RemoteHostConfigError("remote host registry hosts must be a list")
     result = []
@@ -124,9 +119,43 @@ def load_remote_host_configs(path: str | os.PathLike[str] | None = None) -> list
         if record["id"] == "local" or record["id"] in seen:
             raise RemoteHostConfigError(f"duplicate or reserved remote host id: {record['id']}")
         seen.add(record["id"])
-        if record["enabled"]:
-            result.append(record)
+        result.append(record)
     return result
+
+
+def _write_remote_host_configs(path: str | os.PathLike[str] | None, hosts: Iterable[Mapping[str, Any]]) -> None:
+    config_path = remote_hosts_path(path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{config_path.name}.", dir=str(config_path.parent), text=True)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(list(hosts), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, config_path)
+        os.chmod(config_path, 0o600)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def upsert_remote_host_config(raw: Mapping[str, Any], path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Validate and atomically upsert one host, retaining disabled records."""
+    record = _normalize_record(raw)
+    if record["id"] == "local":
+        raise RemoteHostConfigError("local is reserved and cannot be enrolled")
+    existing = _read_all_remote_host_configs(path)
+    updated = [item for item in existing if item["id"] != record["id"]]
+    _write_remote_host_configs(path, updated + [record])
+    return dict(record)
+
+
+def load_remote_host_configs(path: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:
+    return [record for record in _read_all_remote_host_configs(path) if record["enabled"]]
 
 
 class ConfiguredVmHostRegistry(VmHostRegistry):
@@ -281,4 +310,5 @@ __all__ = [
     "load_remote_host_configs",
     "redact_host_record",
     "remote_hosts_path",
+    "upsert_remote_host_config",
 ]
