@@ -638,6 +638,10 @@ cmd_list() {
   ensure_instance_dir
   echo "Instances:"
   shopt -s nullglob
+  # Snapshot running containers ONCE; a per-VM `docker ps` made this O(n)
+  # round-trips to the daemon (~0.45s each) and dominated dashboard load.
+  local _ps_snapshot
+  _ps_snapshot="$(docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null || true)"
   for d in "$INST_DIR"/*; do
     if [[ -d "$d" ]]; then
       local name
@@ -645,7 +649,7 @@ cmd_list() {
       local cname
       cname="$(container_name "$name")"
       local st
-      st=$(docker ps --format '{{.Names}} {{.Status}}' | awk -v n="$cname" '$1==n{print $0}')
+      st=$(awk -v n="$cname" '$1==n{print $0}' <<<"$_ps_snapshot")
       [[ -z "$st" ]] && st="${cname} (stopped)"
       if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
         local hp
