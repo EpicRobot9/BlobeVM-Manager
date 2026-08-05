@@ -3268,8 +3268,19 @@ def api_remote_host_enroll():
 @app.get('/dashboard/api/overview')
 @auth_required
 def api_overview():
+    # Progressive loading: `?parts=host` returns only the cheap host/stats/
+    # activity block (no VM manager shell-out), so the dashboard can paint
+    # immediately and fill in the fleet from a second `?parts=instances` call.
+    parts = {p.strip() for p in (request.args.get('parts') or '').split(',') if p.strip()}
     try:
-        return jsonify({'ok': True, **_dashboard_overview_payload()})
+        if not parts or parts == {'all'}:
+            return jsonify({'ok': True, **_dashboard_overview_payload()})
+        payload = {'ok': True, 'partial': True, 'parts': sorted(parts)}
+        if 'host' in parts:
+            payload.update(_dashboard_overview_host_payload())
+        if 'instances' in parts:
+            payload['instances'] = manager_json_fleet_list()
+        return jsonify(payload)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -3642,14 +3653,26 @@ def _kernel_release():
         return 'Unknown kernel'
 
 
-def _dashboard_overview_payload():
-    optimizer_state = dash_optimizer.status() or {}
-    stats = optimizer_state.get('stats') or {}
-    host_stats = _get_system_stats()
-    history = (stats.get('history') or {}).get('events') or []
-    recent = optimizer_state.get('lastRun', {}).get('events') or []
+def _dashboard_overview_host_payload():
+    """Host/stats/activity only — cheap, no VM manager subprocess.
+
+    Reads the optimizer's history/last-run files directly instead of calling
+    dash_optimizer.status(), which gathers per-VM docker stats (~3s) that the
+    overview never uses.
+    """
+    activity = []
+    try:
+        history = (dash_optimizer._history_state() or {}).get('events') or []
+    except Exception:
+        history = []
+    try:
+        with open(dash_optimizer.LAST_RUN_PATH, 'r') as handle:
+            recent = (json.load(handle) or {}).get('events') or []
+    except Exception:
+        recent = []
     activity = [event for event in [*history, *recent] if isinstance(event, dict)]
     activity.sort(key=lambda event: int(event.get('ts') or 0), reverse=True)
+    host_stats = _get_system_stats()
     return {
         'host': {
             'hostname': platform.node() or 'Unknown host',
@@ -3658,9 +3681,14 @@ def _dashboard_overview_payload():
             'uptimeSeconds': (host_stats or {}).get('uptime', 0),
         },
         'stats': host_stats,
-        'instances': manager_json_fleet_list(),
         'activity': activity[:8],
     }
+
+
+def _dashboard_overview_payload():
+    payload = _dashboard_overview_host_payload()
+    payload['instances'] = manager_json_fleet_list()
+    return payload
 
 
 @app.get('/Dashboard/api/stats')
